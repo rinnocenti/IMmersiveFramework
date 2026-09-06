@@ -23,4 +23,8 @@ MonoBehaviour:
   deduplicateSameFrame: 0
   warnRepeatedSameFrame: 0
   namespaceRules: []
-  typeRules: []
+  typeRules:
+  - ruleId: gameplayready-host-debug
+    enabled: 1
+    ownerTypeName: Immersive.Framework.ApplicationLifecycle.FrameworkRuntimeHost
+    minimumLevel: 1

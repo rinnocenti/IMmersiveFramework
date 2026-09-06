@@ -226,10 +226,11 @@ namespace ImmersiveFrameworkQA.Player.Editor
             GameObject managerHostPrefab = Load<GameObject>(PlayerQaPaths.ManagerHostPath);
 
             Transform p1Anchor = CreateAnchor(root.transform, "QA_Player_SpatialAnchor_P1", new Vector3(-1.5f, 0f, 0f));
+            Transform p2Anchor = CreateAnchor(root.transform, "QA_Player_SpatialAnchor_P2", new Vector3(1.5f, 0f, -1.5f));
             Transform relocateAnchor = CreateAnchor(root.transform, "QA_Player_RelocationAnchor_P1", new Vector3(1.5f, 0f, 0f));
 
             RoutePlayerSpatialEntryAuthoring spatial = root.AddComponent<RoutePlayerSpatialEntryAuthoring>();
-            ConfigureSpatial(spatial, playerOne, p1Anchor);
+            ConfigureSpatial(spatial, (playerOne, p1Anchor), (playerTwo, p2Anchor));
 
             ActivityPlayerRelocationAuthoring relocation = root.AddComponent<ActivityPlayerRelocationAuthoring>();
             ConfigureRelocation(relocation, relocate, playerOne, relocateAnchor);
@@ -353,7 +354,7 @@ namespace ImmersiveFrameworkQA.Player.Editor
             Transform p1Anchor = CreateAnchor(root.transform, "QA_PlayerScene_SpatialAnchor_P1", new Vector3(0f, 0f, 0f));
             PlayerSlotProfile playerOne = Load<PlayerSlotProfile>(PlayerQaPaths.PlayerOneSlotPath);
             RoutePlayerSpatialEntryAuthoring spatial = root.AddComponent<RoutePlayerSpatialEntryAuthoring>();
-            ConfigureSpatial(spatial, playerOne, p1Anchor);
+            ConfigureSpatial(spatial, (playerOne, p1Anchor));
             ActivityPlayerRelocationAuthoring relocation = root.AddComponent<ActivityPlayerRelocationAuthoring>();
             ConfigureRelocation(relocation, startup, playerOne, p1Anchor);
 
@@ -704,15 +705,17 @@ namespace ImmersiveFrameworkQA.Player.Editor
 
         private static void ConfigureSpatial(
             RoutePlayerSpatialEntryAuthoring spatial,
-            PlayerSlotProfile playerOne,
-            Transform anchor)
+            params (PlayerSlotProfile Slot, Transform Anchor)[] entries)
         {
             var serialized = new SerializedObject(spatial);
             SerializedProperty bindings = serialized.FindProperty("bindings");
-            bindings.arraySize = 1;
-            SerializedProperty binding = bindings.GetArrayElementAtIndex(0);
-            binding.FindPropertyRelative("playerSlotProfile").objectReferenceValue = playerOne;
-            binding.FindPropertyRelative("placementAnchor").objectReferenceValue = anchor;
+            bindings.arraySize = entries.Length;
+            for (int index = 0; index < entries.Length; index++)
+            {
+                SerializedProperty binding = bindings.GetArrayElementAtIndex(index);
+                binding.FindPropertyRelative("playerSlotProfile").objectReferenceValue = entries[index].Slot;
+                binding.FindPropertyRelative("placementAnchor").objectReferenceValue = entries[index].Anchor;
+            }
             serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 

@@ -6,8 +6,10 @@ using Immersive.Framework.Actors;
 using Immersive.Framework.GameFlow;
 using Immersive.Framework.PlayerParticipation;
 using Immersive.Framework.PlayerSlots;
+using Immersive.Framework.RuntimeContent;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.LowLevel;
 
 namespace ImmersiveFrameworkQA.Player
 {
@@ -165,6 +167,13 @@ namespace ImmersiveFrameworkQA.Player
                 yield break;
             }
 
+            yield return WaitThen(result, "input-ownership", () => ProveInputOwnership(fixture, result));
+            if (!result.Ok)
+            {
+                completed?.Invoke(result);
+                yield break;
+            }
+
             yield return RunGroup(result, "spatial", () => ProveSpatial(fixture, result));
             if (!result.Ok)
             {
@@ -223,6 +232,7 @@ namespace ImmersiveFrameworkQA.Player
                 catch (Exception exception)
                 {
                     result.Fail(caseId, "no exception", exception.GetType().Name, exception.Message);
+                    (routine as IDisposable)?.Dispose();
                     yield break;
                 }
 
@@ -923,6 +933,187 @@ namespace ImmersiveFrameworkQA.Player
                 "Activity relocation applies to exact Presentation, not Runtime Host",
                 $"anchor={DescribeObject(relocationAnchor)} presentation={DescribeObject(presentation)} runtimeHost={DescribeObject(runtimeHost)}",
                 "Activity relocation must move the exact Presentation spatial root and leave the generic Runtime Host outside the relocation target.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            yield return ProveActivityRelocationAfterRejoin(
+                fixture, result, runtimeHost, presentation, relocationAnchor);
+        }
+
+        private static IEnumerator ProveActivityRelocationAfterRejoin(
+            PlayerQaPanel fixture,
+            Result result,
+            PlayerActorRuntimeHost previousRuntimeHost,
+            GameObject previousPresentation,
+            Transform relocationAnchor)
+        {
+            const string caseId = "actor-lifecycle";
+            if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string issue))
+            {
+                result.Fail(caseId, "available Route-scoped access", issue, issue);
+                yield break;
+            }
+
+            Require(result, caseId,
+                access.TryGetObservation(out PlayerSessionScopedObservationSnapshot before) &&
+                before != null && before.IsAvailable && before.HasCurrentActivityOccurrence,
+                "current Activity occurrence before Leave", access.Snapshot.Diagnostic,
+                "Relocation Rejoin proof requires an immutable Activity baseline.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            PlayerSlotId slotId = ExpectedSlotId(fixture);
+            PlayerSessionScopedSlotObservation previous = FindSlot(before, slotId);
+            LocalPlayerHostAuthoring previousHost = result.PlayerOneHost;
+            Vector3 anchorPosition = relocationAnchor.position;
+            Quaternion anchorRotation = relocationAnchor.rotation;
+            Require(result, caseId,
+                previous.IsJoined && previous.IsLogicalActorPrepared &&
+                previous.IsPhysicallyMaterialized && previous.HasHostEvidence &&
+                previousHost != null && previousRuntimeHost != null && previousPresentation != null,
+                "prepared P1 occurrence and physical baseline", before.Diagnostic,
+                "Capture the current exact P1 occurrence before Leave.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            SessionPlayerLeaveResult leave = access.RequestLeave(
+                new SessionPlayerLeaveRequest(
+                    slotId, previous.Slot.Revision, Source, "player-qa-relocation-leave"));
+            Require(result, caseId, leave != null && leave.Succeeded,
+                "exact P1 Leave succeeded",
+                leave == null ? "null" : $"{leave.Status} {leave.Message}",
+                "Relocation evidence retirement must follow the public Session Player Leave lifecycle.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            yield return WaitFor(result, caseId, () =>
+                TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation released) &&
+                !released.IsJoined && !released.IsLogicalActorPrepared &&
+                !released.IsPhysicallyMaterialized && previousPresentation == null &&
+                previousRuntimeHost == null && previousHost == null,
+                "Leave did not release P1, its prepared Actor, Presentation and Runtime Host.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            result.PlayerOneHost = null;
+            PlayerParticipationOperationResult open = access.OpenJoining(
+                Source, "player-qa-relocation-rejoin-open");
+            Require(result, caseId,
+                open != null && open.Completed && open.Snapshot != null && open.Snapshot.JoiningOpen,
+                "joining open", open == null ? "null" : $"{open.Status} {open.Message}",
+                "Relocation Rejoin requires the public joining policy.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            Require(result, caseId,
+                fixture.Probe.TryGetJoinAccess(out ILocalPlayerJoinAccess joinAccess, out string joinIssue) &&
+                joinAccess != null,
+                "public Join access", joinIssue, "Relocation Rejoin requires the authored Join surface.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            LocalPlayerJoinResult join = joinAccess.RequestJoin(
+                new LocalPlayerJoinRequest(Source, "player-qa-relocation-rejoin"));
+            Require(result, caseId,
+                join != null && join.Succeeded && join.Slot.PlayerSlotId == slotId &&
+                join.Slot.Revision > previous.Slot.Revision &&
+                join.HasLocalPlayerHostEvidence && join.LocalPlayerHost != null,
+                "fresh P1 occurrence in the same stable Slot",
+                join == null ? "null" : $"{join.Status} revision={join.Slot.Revision} {join.Message}",
+                "Rejoin must create a newer P1 occurrence through the public Join authority.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            result.PlayerOneHost = join.LocalPlayerHost;
+            yield return WaitForSlot(result, caseId, fixture, slot => slot.IsJoined && slot.HasHostEvidence);
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            Require(result, caseId,
+                TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation fresh),
+                "fresh P1 observation", "missing", "Rejoin observation is unavailable.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            if (fresh.Slot.SelectedActorProfile != fixture.DefaultActor)
+            {
+                PlayerActorSelectionResult selection = access.RequestSelectDefaultActor(
+                    slotId, fresh.Slot.SelectionRevision, Source, "player-qa-relocation-rejoin-default-actor");
+                Require(result, caseId, selection != null && selection.Succeeded,
+                    "Default Actor selected",
+                    selection == null ? "null" : $"{selection.Status} {selection.Message}",
+                    "Rejoined P1 must restore its Actor through public selection.");
+                if (!result.Ok)
+                {
+                    yield break;
+                }
+            }
+
+            yield return WaitForSlot(result, caseId, fixture,
+                slot => slot.IsJoined && slot.Slot.SelectedActorProfile == fixture.DefaultActor &&
+                        slot.IsLogicalActorPrepared && slot.IsPhysicallyMaterialized &&
+                        slot.CurrentActor.HasCurrentActor && slot.HasHostEvidence);
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            Require(result, caseId,
+                access.TryGetObservation(out PlayerSessionScopedObservationSnapshot after) &&
+                after != null && after.IsAvailable && after.HasCurrentActivityOccurrence &&
+                after.ActivityOwner == before.ActivityOwner &&
+                after.ActivityOccurrence == before.ActivityOccurrence,
+                "same Activity owner and occurrence across Leave/Rejoin",
+                after != null ? after.Diagnostic : "missing",
+                "A new Activity occurrence would mask stale per-Slot relocation evidence.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            PlayerSessionScopedSlotObservation current = FindSlot(after, slotId);
+            PlayerActorRuntimeHost[] runtimeHosts = result.PlayerOneHost.ActorMount != null
+                ? result.PlayerOneHost.ActorMount.GetComponentsInChildren<PlayerActorRuntimeHost>(true)
+                : Array.Empty<PlayerActorRuntimeHost>();
+            PlayerActorRuntimeHost runtimeHost = runtimeHosts.Length == 1 ? runtimeHosts[0] : null;
+            GameObject presentation = runtimeHost != null && runtimeHost.PresentationMount != null &&
+                runtimeHost.PresentationMount.childCount == 1
+                ? runtimeHost.PresentationMount.GetChild(0).gameObject
+                : null;
+            Require(result, caseId,
+                current.IsJoined && current.IsLogicalActorPrepared && current.IsPhysicallyMaterialized &&
+                current.Slot.Revision > previous.Slot.Revision && current.HasHostEvidence &&
+                current.HostEvidence.AssignmentToken != previous.HostEvidence.AssignmentToken &&
+                runtimeHost != null && !ReferenceEquals(runtimeHost, previousRuntimeHost) &&
+                presentation != null && !ReferenceEquals(presentation, previousPresentation) &&
+                Vector3.Distance(presentation.transform.position, anchorPosition) < 0.0001f &&
+                Quaternion.Angle(presentation.transform.rotation, anchorRotation) < 0.001f &&
+                Vector3.Distance(runtimeHost.transform.position, anchorPosition) >= 0.0001f,
+                "fresh P1 Presentation relocated within the retained Activity occurrence",
+                $"activityOccurrence={after.ActivityOccurrence} previousRevision={previous.Slot.Revision} " +
+                $"currentRevision={current.Slot.Revision} presentation={DescribeObject(presentation)} " +
+                $"runtimeHost={DescribeObject(runtimeHost)} anchor={anchorPosition}",
+                "The ended P1 occurrence must not suppress relocation of its successor; Runtime Host is not the spatial body.");
         }
 
         private static IEnumerator ProveGameplayReadyReader(
@@ -1069,6 +1260,52 @@ namespace ImmersiveFrameworkQA.Player
             if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string issue))
             {
                 result.Fail("reader-cardinality", "available Route-scoped access", issue, issue);
+                yield break;
+            }
+
+            ActivityRequestTrigger startupTrigger = fixture.RelocateActivityTrigger;
+            Require(result, "reader-cardinality",
+                fixture.StartupActivity != null && fixture.StartupActivity.HasValidActivityId &&
+                fixture.StartupActivity.PlayerParticipationRequirementLevel ==
+                    PlayerParticipationRequirementLevel.JoinedSlots &&
+                startupTrigger != null && !startupTrigger.IsRequestInFlight,
+                "Startup Activity requiring only JoinedSlots and idle Activity trigger",
+                "missing, invalid or busy",
+                "Reader cardinality requires a stable explicit-selection context before Join.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            RuntimeContentOwner startupOwner = RuntimeContentOwner.Activity(
+                fixture.StartupActivity.ActivityId.StableText,
+                fixture.StartupActivity.ActivityName,
+                RuntimeDefinitionToken.FromUnityObject(fixture.StartupActivity));
+            var previousTarget = startupTrigger.TargetActivity;
+            try
+            {
+                startupTrigger.TargetActivity = fixture.StartupActivity;
+                yield return RequestActivity(result, "reader-cardinality", startupTrigger,
+                    expectSuccess: true,
+                    $"Startup Activity did not complete before the {fixtureName} occurrence Join.");
+                if (!result.Ok)
+                {
+                    yield break;
+                }
+
+                yield return WaitFor(result, "reader-cardinality", () =>
+                    access.TryGetObservation(out PlayerSessionScopedObservationSnapshot startup) &&
+                    startup != null && startup.IsAvailable && startup.HasCurrentActivityOccurrence &&
+                    startup.ActivityOwner == startupOwner,
+                    "Startup Activity is not the current Activity before the fresh occurrence Join.");
+            }
+            finally
+            {
+                startupTrigger.TargetActivity = previousTarget;
+            }
+
+            if (!result.Ok)
+            {
                 yield break;
             }
 
@@ -2162,6 +2399,1655 @@ namespace ImmersiveFrameworkQA.Player
             yield return null;
         }
 
+        private static IEnumerator ProveInputOwnership(PlayerQaPanel fixture, Result result)
+        {
+            var resources = new InputOwnershipResources();
+            var proof = new InputOwnershipProof();
+            var cleanup = new InputOwnershipCleanup();
+            try
+            {
+                yield return RunInputOwnershipProof(fixture, result, resources, proof);
+                yield return CleanupInputOwnership(fixture, resources, cleanup);
+                EmitInputOwnershipDiagnostic(fixture, resources, proof, cleanup);
+                ApplyInputOwnershipResult(result, proof, cleanup, fixture);
+            }
+            finally
+            {
+                LastResortCleanupInputOwnership(fixture, resources);
+            }
+        }
+
+        private static IEnumerator RunInputOwnershipProof(
+            PlayerQaPanel fixture,
+            Result result,
+            InputOwnershipResources resources,
+            InputOwnershipProof proof)
+        {
+            if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string accessIssue) ||
+                access == null)
+            {
+                proof.Record("available Session observation", accessIssue, accessIssue);
+                yield break;
+            }
+
+            if (!access.TryGetObservation(out PlayerSessionScopedObservationSnapshot start) ||
+                start == null ||
+                !start.IsAvailable)
+            {
+                proof.Record(
+                    "available Session observation",
+                    start == null ? "null" : start.Diagnostic,
+                    "input-ownership requires the Route-scoped Session observation left by negatives.");
+                yield break;
+            }
+
+            PlayerSessionScopedSlotObservation p1 = FindSlot(start, ExpectedSlotId(fixture));
+            PlayerSessionScopedSlotObservation p2 = FindSlot(start, ExpectedSlotTwoId(fixture));
+            bool joiningOpen = start.Participation != null && start.Participation.JoiningOpen;
+            bool relocateIdle = fixture.RelocateActivityTrigger == null ||
+                !fixture.RelocateActivityTrigger.IsRequestInFlight;
+            bool gameplayReadyIdle = fixture.GameplayReadyActivityTrigger == null ||
+                !fixture.GameplayReadyActivityTrigger.IsRequestInFlight;
+            Keyboard currentKeyboard = Keyboard.current;
+            if (!proof.Check(
+                    joiningOpen &&
+                    p1.IsJoined &&
+                    p1.HasHostEvidence &&
+                    p1.HostEvidence.AssignmentOrigin ==
+                        PlayerSlotAssignmentOrigin.ManagerProvisioned &&
+                    p1.Slot.Revision > 0 &&
+                    !p2.IsJoined &&
+                    !p2.HasHostEvidence &&
+                    relocateIdle &&
+                    gameplayReadyIdle &&
+                    currentKeyboard != null,
+                    "joined Manager-Provisioned P1, available P2, Joining open, idle Activities, Keyboard.current",
+                    $"joiningOpen={joiningOpen} p1Joined={p1.IsJoined} p1Host={p1.HasHostEvidence} " +
+                    $"p1Origin={(p1.HasHostEvidence ? p1.HostEvidence.AssignmentOrigin.ToString() : "none")} " +
+                    $"p1Revision={p1.Slot.Revision} p2Joined={p2.IsJoined} p2Host={p2.HasHostEvidence} " +
+                    $"relocateInFlight={!relocateIdle} gameplayReadyInFlight={!gameplayReadyIdle} " +
+                    $"keyboard={(currentKeyboard != null)}",
+                    "input-ownership must start from the negatives leftover: retained P1, released P2, open Joining and no Activity request in flight."))
+            {
+                yield break;
+            }
+
+            LocalPlayerHostAuthoring leftoverHost = result.PlayerOneHost;
+            PlayerGameplayInputReader leftoverReader = result.CurrentGameplayReader;
+            SessionPlayerLeaveResult leftoverLeave = access.RequestLeave(
+                new SessionPlayerLeaveRequest(
+                    ExpectedSlotId(fixture),
+                    p1.Slot.Revision,
+                    Source,
+                    "player-qa-input-ownership-leave-leftover-p1"));
+            if (!proof.Check(
+                    leftoverLeave != null && leftoverLeave.Succeeded,
+                    "leftover P1 Leave succeeded",
+                    leftoverLeave == null ? "null" : $"{leftoverLeave.Status} {leftoverLeave.Message}",
+                    "input-ownership must publicly Leave the leftover P1 occurrence before creating temporary devices."))
+            {
+                yield break;
+            }
+
+            yield return WaitUntil(
+                proof,
+                () => TryFindSlot(fixture, ExpectedSlotId(fixture), out PlayerSessionScopedSlotObservation releasedP1) &&
+                      TryFindSlot(fixture, ExpectedSlotTwoId(fixture), out PlayerSessionScopedSlotObservation releasedP2) &&
+                      !releasedP1.IsJoined &&
+                      !releasedP1.HasHostEvidence &&
+                      !releasedP1.HasInputOwnershipEvidence &&
+                      !releasedP2.IsJoined &&
+                      (leftoverHost == null) &&
+                      (leftoverReader == null || !leftoverReader.HasCurrentGameplayBinding),
+                "Timed out waiting for leftover P1 terminal release before the ADR-025 fixture.");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            result.PlayerOneHost = null;
+            result.CurrentGameplayReader = null;
+
+            ActivityRequestTrigger gameplayReadyTrigger = fixture.GameplayReadyActivityTrigger;
+            if (!proof.Check(
+                    gameplayReadyTrigger != null,
+                    "GameplayReady Activity trigger",
+                    "null",
+                    "input-ownership requires the existing GameplayReady Activity trigger to clear the leftover current Activity."))
+            {
+                yield break;
+            }
+
+            gameplayReadyTrigger.ClearActivity();
+            yield return WaitUntil(
+                proof,
+                () => !gameplayReadyTrigger.IsRequestInFlight,
+                "Timed out waiting for GameplayReady ClearActivity to finish.");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            yield return WaitUntil(
+                proof,
+                () => access.TryGetObservation(out PlayerSessionScopedObservationSnapshot cleared) &&
+                      cleared != null &&
+                      cleared.IsAvailable &&
+                      !cleared.HasCurrentActivityOccurrence &&
+                      !gameplayReadyTrigger.IsRequestInFlight,
+                "Timed out waiting for GameplayReady to stop being the current Activity occurrence.");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            if (!proof.Check(
+                    gameplayReadyTrigger.LastRequestSucceeded ||
+                    gameplayReadyTrigger.LastRequestIgnored,
+                    "ClearActivity succeeded or already inactive",
+                    $"outcome={gameplayReadyTrigger.LastOutcome} message={gameplayReadyTrigger.LastMessage}",
+                    "ClearActivity must leave no current Activity occurrence for the ADR-025 GameplayReady re-enter."))
+            {
+                yield break;
+            }
+
+            resources.OriginalKeyboard = Keyboard.current;
+            if (!proof.Check(
+                    resources.OriginalKeyboard != null,
+                    "Keyboard.current before temporary devices",
+                    "null",
+                    "Temporary Keyboards cannot be created without the Editor Keyboard remaining distinct from the fixture devices."))
+            {
+                yield break;
+            }
+
+            resources.DeviceA = InputSystem.AddDevice<Keyboard>();
+            resources.DeviceB = InputSystem.AddDevice<Keyboard>();
+            if (!proof.Check(
+                    resources.DeviceA != null &&
+                    resources.DeviceB != null &&
+                    resources.DeviceA.added &&
+                    resources.DeviceB.added &&
+                    !ReferenceEquals(resources.DeviceA, resources.DeviceB) &&
+                    resources.DeviceA.deviceId != resources.DeviceB.deviceId &&
+                    !ReferenceEquals(resources.DeviceA, resources.OriginalKeyboard) &&
+                    !ReferenceEquals(resources.DeviceB, resources.OriginalKeyboard),
+                    "two distinct added temporary Keyboards",
+                    $"deviceA={(resources.DeviceA != null ? resources.DeviceA.deviceId.ToString() : "null")} " +
+                    $"deviceB={(resources.DeviceB != null ? resources.DeviceB.deviceId.ToString() : "null")} " +
+                    $"original={(resources.OriginalKeyboard != null ? resources.OriginalKeyboard.deviceId.ToString() : "null")}",
+                    "ADR-025 fixture requires two retained temporary Keyboard devices that are not Keyboard.current."))
+            {
+                yield break;
+            }
+
+            if (!proof.Check(
+                    fixture.JoinCommand != null,
+                    "existing Join command trigger",
+                    "null",
+                    "input-ownership must use the authored PlayerSessionJoinCommandTrigger."))
+            {
+                yield break;
+            }
+
+            yield return ProveInputOwnershipNegatives(fixture, resources, proof);
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            yield return ProveInputOwnershipJoins(fixture, resources, proof);
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            yield return ProveInputOwnershipGameplayIsolation(fixture, resources, proof);
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            yield return ProveInputOwnershipLeaveRejoin(fixture, access, resources, proof);
+        }
+
+        private static IEnumerator ProveInputOwnershipNegatives(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources,
+            InputOwnershipProof proof)
+        {
+            int invocationBeforeNull = fixture.JoinCommand.InvocationCount;
+            fixture.JoinCommand.InvokeFromDevice(null);
+            if (!IsRejectedInvalidDeviceJoin(fixture.JoinCommand) ||
+                fixture.JoinCommand.InvocationCount <= invocationBeforeNull)
+            {
+                LocalPlayerJoinResult nullJoin = fixture.JoinCommand.LastJoinResult;
+                proof.Record(
+                    "RejectedInvalidRequest",
+                    nullJoin == null
+                        ? $"outcome={fixture.JoinCommand.LastOutcome}"
+                        : $"{nullJoin.Status} {nullJoin.Message}",
+                    "InvokeFromDevice(null) must reject without joining a Slot.");
+                yield break;
+            }
+
+            if (!proof.Check(
+                    !AnyJoinedOwnership(fixture),
+                    "no Joined Slot, Host or ownership after null device Join",
+                    DescribeJoinedOwnership(fixture),
+                    "Rejected explicit-device Join must not create a Player, Host or ownership evidence."))
+            {
+                yield break;
+            }
+
+            resources.RemovedProbe = InputSystem.AddDevice<Keyboard>();
+            if (!proof.Check(
+                    resources.RemovedProbe != null &&
+                    resources.RemovedProbe.added &&
+                    resources.RemovedProbe.deviceId != resources.DeviceA.deviceId &&
+                    resources.RemovedProbe.deviceId != resources.DeviceB.deviceId,
+                    "third temporary Keyboard for removed-device rejection",
+                    resources.RemovedProbe == null ? "null" : resources.RemovedProbe.deviceId.ToString(),
+                    "Removed-device Join rejection requires a probe Keyboard that is not deviceA or deviceB."))
+            {
+                yield break;
+            }
+
+            InputSystem.RemoveDevice(resources.RemovedProbe);
+            if (!proof.Check(
+                    !resources.RemovedProbe.added,
+                    "removed probe Keyboard",
+                    "still added",
+                    "InvokeFromDevice(removedDevice) requires the probe to be removed from the Input System first."))
+            {
+                yield break;
+            }
+
+            int invocationBeforeRemoved = fixture.JoinCommand.InvocationCount;
+            fixture.JoinCommand.InvokeFromDevice(resources.RemovedProbe);
+            if (!IsRejectedInvalidDeviceJoin(fixture.JoinCommand) ||
+                fixture.JoinCommand.InvocationCount <= invocationBeforeRemoved)
+            {
+                LocalPlayerJoinResult removedJoin = fixture.JoinCommand.LastJoinResult;
+                proof.Record(
+                    "RejectedInvalidRequest",
+                    removedJoin == null
+                        ? $"outcome={fixture.JoinCommand.LastOutcome}"
+                        : $"{removedJoin.Status} {removedJoin.Message}",
+                    "InvokeFromDevice(removedDevice) must reject without fallback Join.");
+                yield break;
+            }
+
+            proof.Check(
+                !AnyJoinedOwnership(fixture),
+                "no Joined Slot, Host or ownership after removed-device Join",
+                DescribeJoinedOwnership(fixture),
+                "Rejected removed-device Join must not create a Player, Host or ownership evidence.");
+            yield return null;
+        }
+
+        private static IEnumerator ProveInputOwnershipJoins(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources,
+            InputOwnershipProof proof)
+        {
+            fixture.JoinCommand.InvokeFromDevice(resources.DeviceA);
+            LocalPlayerJoinResult joinA = fixture.JoinCommand.LastJoinResult;
+            if (!proof.Check(
+                    joinA != null &&
+                    joinA.Succeeded &&
+                    joinA.Slot.PlayerSlotId.IsValid &&
+                    joinA.LocalPlayerHost != null &&
+                    joinA.PlayerInput != null,
+                    "SucceededJoined from InvokeFromDevice(deviceA)",
+                    joinA == null ? "null" : $"{joinA.Status} {joinA.Message}",
+                    "Device A must Join through the existing PlayerSessionJoinCommandTrigger."))
+            {
+                yield break;
+            }
+
+            resources.SlotA = joinA.Slot.PlayerSlotId;
+            resources.RevisionA = joinA.Slot.Revision;
+            resources.HostA = joinA.LocalPlayerHost;
+            resources.PlayerInputA = joinA.PlayerInput;
+            yield return WaitUntil(
+                proof,
+                () => TryFindSlot(fixture, resources.SlotA, out PlayerSessionScopedSlotObservation slotA) &&
+                      slotA.IsJoined &&
+                      slotA.HasHostEvidence,
+                "Timed out waiting for Slot A observation after InvokeFromDevice(deviceA).");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            fixture.JoinCommand.InvokeFromDevice(resources.DeviceB);
+            LocalPlayerJoinResult joinB = fixture.JoinCommand.LastJoinResult;
+            if (!proof.Check(
+                    joinB != null &&
+                    joinB.Succeeded &&
+                    joinB.Slot.PlayerSlotId.IsValid &&
+                    joinB.Slot.PlayerSlotId != resources.SlotA &&
+                    joinB.LocalPlayerHost != null &&
+                    joinB.PlayerInput != null &&
+                    !ReferenceEquals(joinB.LocalPlayerHost, resources.HostA) &&
+                    !ReferenceEquals(joinB.PlayerInput, resources.PlayerInputA),
+                    "SucceededJoined distinct Slot/Host/PlayerInput from InvokeFromDevice(deviceB)",
+                    joinB == null
+                        ? "null"
+                        : $"{joinB.Status} slot={joinB.Slot.PlayerSlotId.StableText} {joinB.Message}",
+                    "Device B must Join a second current Slot through the same Join trigger."))
+            {
+                yield break;
+            }
+
+            resources.SlotB = joinB.Slot.PlayerSlotId;
+            resources.RevisionB = joinB.Slot.Revision;
+            resources.HostB = joinB.LocalPlayerHost;
+            resources.PlayerInputB = joinB.PlayerInput;
+            yield return WaitUntil(
+                proof,
+                () => TryFindSlot(fixture, resources.SlotB, out PlayerSessionScopedSlotObservation slotB) &&
+                      slotB.IsJoined &&
+                      slotB.HasHostEvidence,
+                "Timed out waiting for Slot B observation after InvokeFromDevice(deviceB).");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string issue) ||
+                !access.TryGetObservation(out PlayerSessionScopedObservationSnapshot observation) ||
+                observation == null)
+            {
+                proof.Record("available scoped observation after both Joins", issue, issue);
+                yield break;
+            }
+
+            PlayerSessionScopedSlotObservation observedA = FindSlot(observation, resources.SlotA);
+            PlayerSessionScopedSlotObservation observedB = FindSlot(observation, resources.SlotB);
+            resources.HostBindingA = observedA.HostEvidence.HostBindingIdentity;
+            resources.HostBindingB = observedB.HostEvidence.HostBindingIdentity;
+            resources.AssignmentA = observedA.HostEvidence.AssignmentToken;
+            resources.AssignmentB = observedB.HostEvidence.AssignmentToken;
+            if (!proof.Check(
+                    observedA.IsJoined &&
+                    observedB.IsJoined &&
+                    observedA.HasHostEvidence &&
+                    observedB.HasHostEvidence &&
+                    observedA.HasInputOwnershipEvidence &&
+                    observedB.HasInputOwnershipEvidence,
+                    "both current Slots Joined with Host and input ownership evidence",
+                    $"aJoined={observedA.IsJoined} aHost={observedA.HasHostEvidence} " +
+                    $"aOwnership={observedA.HasInputOwnershipEvidence} bJoined={observedB.IsJoined} " +
+                    $"bHost={observedB.HasHostEvidence} bOwnership={observedB.HasInputOwnershipEvidence}",
+                    "Public Session observation must expose current input ownership for both ADR-025 Players before gameplay."))
+            {
+                yield break;
+            }
+
+            bool aOwnsA = OwnershipContainsDevice(observedA.InputOwnership, resources.DeviceA.deviceId);
+            bool aOwnsB = OwnershipContainsDevice(observedA.InputOwnership, resources.DeviceB.deviceId);
+            bool bOwnsB = OwnershipContainsDevice(observedB.InputOwnership, resources.DeviceB.deviceId);
+            bool bOwnsA = OwnershipContainsDevice(observedB.InputOwnership, resources.DeviceA.deviceId);
+            if (!proof.Check(
+                    resources.DeviceA.deviceId != resources.DeviceB.deviceId &&
+                    aOwnsA && !aOwnsB && bOwnsB && !bOwnsA,
+                    "Slot A owns only deviceA and Slot B owns only deviceB",
+                    $"deviceA={resources.DeviceA.deviceId} deviceB={resources.DeviceB.deviceId} " +
+                    $"aOwnsA={aOwnsA} aOwnsB={aOwnsB} bOwnsB={bOwnsB} bOwnsA={bOwnsA}",
+                    "Public input ownership must isolate DeviceId evidence per current Slot."))
+            {
+                yield break;
+            }
+
+            int indexA = observedA.InputOwnership.UnityPlayerIndex;
+            int indexB = observedB.InputOwnership.UnityPlayerIndex;
+            resources.PlayerIndexA = indexA;
+            resources.PlayerIndexB = indexB;
+            if (!proof.Check(
+                    indexA != indexB &&
+                    resources.PlayerInputA != null &&
+                    resources.PlayerInputB != null &&
+                    indexA == resources.PlayerInputA.playerIndex &&
+                    indexB == resources.PlayerInputB.playerIndex,
+                    "distinct Unity playerIndex values matching each Host PlayerInput",
+                    $"ownershipA={indexA} ownershipB={indexB} " +
+                    $"playerInputA={(resources.PlayerInputA != null ? resources.PlayerInputA.playerIndex.ToString() : "null")} " +
+                    $"playerInputB={(resources.PlayerInputB != null ? resources.PlayerInputB.playerIndex.ToString() : "null")}",
+                    "Simultaneous ADR-025 Players must expose distinct Unity playerIndex values that match their PlayerInput."))
+            {
+                yield break;
+            }
+
+            string schemeA = EffectiveControlScheme(resources.PlayerInputA);
+            string schemeB = EffectiveControlScheme(resources.PlayerInputB);
+            proof.Check(
+                string.Equals(observedA.InputOwnership.ControlScheme, schemeA, StringComparison.Ordinal) &&
+                string.Equals(observedB.InputOwnership.ControlScheme, schemeB, StringComparison.Ordinal),
+                "public ControlScheme matches PlayerInput.currentControlScheme",
+                $"ownershipA='{observedA.InputOwnership.ControlScheme}' playerInputA='{schemeA}' " +
+                $"ownershipB='{observedB.InputOwnership.ControlScheme}' playerInputB='{schemeB}'",
+                "Ownership ControlScheme must match the effective PlayerInput scheme, including an empty scheme.");
+        }
+
+        private static IEnumerator ProveInputOwnershipGameplayIsolation(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources,
+            InputOwnershipProof proof)
+        {
+            ActivityRequestTrigger trigger = fixture.GameplayReadyActivityTrigger;
+            if (!proof.Check(
+                    trigger != null &&
+                    fixture.GameplayReadyActivity != null &&
+                    ReferenceEquals(trigger.TargetActivity, fixture.GameplayReadyActivity),
+                    "GameplayReady Activity trigger",
+                    trigger != null && trigger.TargetActivity != null
+                        ? trigger.TargetActivity.ActivityName
+                        : "missing",
+                    "Two-player ADR-025 preparation must reuse the existing GameplayReady Activity trigger."))
+            {
+                yield break;
+            }
+
+            trigger.RequestActivity();
+            yield return WaitUntil(
+                proof,
+                () => !trigger.IsRequestInFlight &&
+                      (trigger.LastRequestSucceeded ||
+                       trigger.LastRequestFailed ||
+                       trigger.LastRequestIgnored),
+                "Timed out waiting for the ADR-025 GameplayReady Activity request.");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            if (!proof.Check(
+                    trigger.LastRequestSucceeded,
+                    "GameplayReady Activity request succeeded",
+                    $"outcome={trigger.LastOutcome} message={trigger.LastMessage}",
+                    "GameplayReady must actually enter for the two ADR-025 Players."))
+            {
+                CaptureInputOwnershipGameplayReadyRequest(resources, trigger);
+                CaptureInputOwnershipSlotGameplayEvidence(fixture, resources);
+                EmitInputOwnershipGameplayReadyDiagnostic(fixture, resources);
+                yield break;
+            }
+
+            CaptureInputOwnershipGameplayReadyRequest(resources, trigger);
+            CaptureInputOwnershipSlotGameplayEvidence(fixture, resources);
+            if (IsInputOwnershipGameplayReadyBlocked(resources))
+            {
+                EmitInputOwnershipGameplayReadyDiagnostic(fixture, resources);
+            }
+
+            yield return WaitUntil(
+                proof,
+                () => IsInputOwnershipSlotGameplayReady(fixture, resources.SlotA) &&
+                      IsInputOwnershipSlotGameplayReady(fixture, resources.SlotB),
+                "Timed out waiting for both ADR-025 Slots to become GameplayReady with their configured default Actors. " +
+                $"activityReadiness='{DescribeDiagnostic(resources.ActivityReadiness)}' " +
+                $"blockingIssueCount='{DescribeDiagnostic(resources.BlockingIssueCount)}' " +
+                $"blockingFailureKind='{DescribeDiagnostic(resources.BlockingFailureKind)}' " +
+                $"blockingFailureMessage='{DescribeDiagnostic(resources.BlockingFailureMessage)}'.");
+            CaptureInputOwnershipSlotGameplayEvidence(fixture, resources);
+            if (proof.HasFailure)
+            {
+                EmitInputOwnershipGameplayReadyDiagnostic(fixture, resources);
+                yield break;
+            }
+
+            bool resolvedA = TryResolveCurrentGameplayReader(
+                resources.HostA, out PlayerGameplayInputReader readerA, out string readerAIssue);
+            bool resolvedB = TryResolveCurrentGameplayReader(
+                resources.HostB, out PlayerGameplayInputReader readerB, out string readerBIssue);
+            if (!resolvedA || !resolvedB)
+            {
+                proof.Record(
+                    "Host-local gameplay reader for each ADR-025 Player",
+                    $"readerA='{readerAIssue}' readerB='{readerBIssue}'",
+                    "Each ADR-025 Host must resolve exactly one current Presentation reader.");
+                yield break;
+            }
+
+            resources.ReaderA = readerA;
+            resources.ReaderB = readerB;
+            if (!TryFindSlot(fixture, resources.SlotA, out PlayerSessionScopedSlotObservation slotA) ||
+                !TryFindSlot(fixture, resources.SlotB, out PlayerSessionScopedSlotObservation slotB))
+            {
+                proof.Record(
+                    "current Slot observations after GameplayReady",
+                    "missing",
+                    "Could not recollect Slot A/B after GameplayReady.");
+                yield break;
+            }
+
+            resources.BindingA = slotA.GameplayAdmission.InputBindingToken;
+            resources.BindingB = slotB.GameplayAdmission.InputBindingToken;
+            if (!proof.Check(
+                    readerA.HasCurrentGameplayBinding &&
+                    readerB.HasCurrentGameplayBinding &&
+                    readerA.CurrentBindingToken.IsValid &&
+                    readerB.CurrentBindingToken.IsValid &&
+                    readerA.CurrentBindingToken == slotA.GameplayAdmission.InputBindingToken &&
+                    readerB.CurrentBindingToken == slotB.GameplayAdmission.InputBindingToken &&
+                    !ReferenceEquals(readerA, readerB),
+                    "each Host-local reader bound to its own Slot gameplay token",
+                    $"readerA={readerA.CurrentBindingToken.StableText} " +
+                    $"slotA={slotA.GameplayAdmission.InputBindingToken.StableText} " +
+                    $"readerB={readerB.CurrentBindingToken.StableText} " +
+                    $"slotB={slotB.GameplayAdmission.InputBindingToken.StableText}",
+                    "Readers must be resolved from their own Host and bound to their own current gameplay token."))
+            {
+                yield break;
+            }
+
+            InputActionAsset actions = resources.PlayerInputA != null ? resources.PlayerInputA.actions : null;
+            InputAction activate = actions != null ? actions.FindAction("Gameplay/Activate", false) : null;
+            resources.ActivateReference = activate != null ? InputActionReference.Create(activate) : null;
+            if (!proof.Check(
+                    resources.ActivateReference != null &&
+                    resources.ActivateReference.action != null,
+                    "runtime InputActionReference for Gameplay/Activate",
+                    "missing",
+                    "ADR-025 isolation must derive Gameplay/Activate from the live PlayerInput.actions instance."))
+            {
+                yield break;
+            }
+
+            NeutralizeInputOwnershipKeyboards(resources);
+            yield return null;
+            bool idleA = ReaderIsPressed(readerA, resources.ActivateReference);
+            bool idleB = ReaderIsPressed(readerB, resources.ActivateReference);
+            QueueKeyboardSpace(resources.DeviceA, true);
+            QueueKeyboardSpace(resources.DeviceB, false);
+            InputSystem.Update();
+            yield return null;
+            resources.AToA = ReaderIsPressed(readerA, resources.ActivateReference);
+            resources.AToB = ReaderIsPressed(readerB, resources.ActivateReference);
+            QueueKeyboardSpace(resources.DeviceA, false);
+            QueueKeyboardSpace(resources.DeviceB, true);
+            InputSystem.Update();
+            yield return null;
+            resources.BToA = ReaderIsPressed(readerA, resources.ActivateReference);
+            resources.BToB = ReaderIsPressed(readerB, resources.ActivateReference);
+            NeutralizeInputOwnershipKeyboards(resources);
+            yield return null;
+            if (!proof.Check(
+                    !idleA && !idleB &&
+                    resources.AToA && !resources.AToB &&
+                    resources.BToB && !resources.BToA,
+                    "aToA=true aToB=false bToB=true bToA=false",
+                    $"idleA={idleA} idleB={idleB} aToA={resources.AToA} aToB={resources.AToB} " +
+                    $"bToB={resources.BToB} bToA={resources.BToA}",
+                    "Device A must drive only Reader A and Device B must drive only Reader B."))
+            {
+                yield break;
+            }
+
+            if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string issue) ||
+                !access.TryGetObservation(out PlayerSessionScopedObservationSnapshot afterGameplay) ||
+                afterGameplay == null)
+            {
+                proof.Record("scoped observation after gameplay preparation", issue, issue);
+                yield break;
+            }
+
+            PlayerSessionScopedSlotObservation ownedA = FindSlot(afterGameplay, resources.SlotA);
+            PlayerSessionScopedSlotObservation ownedB = FindSlot(afterGameplay, resources.SlotB);
+            proof.Check(
+                ownedA.HasInputOwnershipEvidence &&
+                ownedB.HasInputOwnershipEvidence &&
+                OwnershipContainsDevice(ownedA.InputOwnership, resources.DeviceA.deviceId) &&
+                !OwnershipContainsDevice(ownedA.InputOwnership, resources.DeviceB.deviceId) &&
+                OwnershipContainsDevice(ownedB.InputOwnership, resources.DeviceB.deviceId) &&
+                !OwnershipContainsDevice(ownedB.InputOwnership, resources.DeviceA.deviceId),
+                "physical ownership unchanged after GameplayReady",
+                $"aOwnsA={OwnershipContainsDevice(ownedA.InputOwnership, resources.DeviceA.deviceId)} " +
+                $"bOwnsB={OwnershipContainsDevice(ownedB.InputOwnership, resources.DeviceB.deviceId)}",
+                "Gameplay preparation must not change public DeviceId ownership.");
+        }
+
+        private static IEnumerator ProveInputOwnershipLeaveRejoin(
+            PlayerQaPanel fixture,
+            IPlayerSessionScopedAccess access,
+            InputOwnershipResources resources,
+            InputOwnershipProof proof)
+        {
+            if (!access.TryGetObservation(out PlayerSessionScopedObservationSnapshot preLeaveSnapshot) ||
+                preLeaveSnapshot == null)
+            {
+                proof.Record(
+                    "pre-Leave scoped observation",
+                    "unavailable",
+                    "Leave A requires a retained public snapshot for immutability proof.");
+                yield break;
+            }
+
+            PlayerSessionScopedSlotObservation preA = FindSlot(preLeaveSnapshot, resources.SlotA);
+            PlayerSessionScopedSlotObservation preB = FindSlot(preLeaveSnapshot, resources.SlotB);
+            resources.HostBindingB = preB.HostEvidence.HostBindingIdentity;
+            resources.AssignmentB = preB.HostEvidence.AssignmentToken;
+            LocalPlayerHostAuthoring previousHostA = resources.HostA;
+            PlayerGameplayInputReader previousReaderA = resources.ReaderA;
+            PlayerGameplayInputBindingToken previousBindingA = previousReaderA != null
+                ? previousReaderA.CurrentBindingToken
+                : default;
+            PlayerHostBindingIdentity previousHostBindingA = preA.HostEvidence.HostBindingIdentity;
+            PlayerSlotAssignmentToken previousAssignmentA = preA.HostEvidence.AssignmentToken;
+            int previousRevisionA = preA.Slot.Revision;
+            int previousRevisionB = preB.Slot.Revision;
+            resources.RevisionBBeforeLeaveA = previousRevisionB;
+            LocalPlayerHostAuthoring hostB = resources.HostB;
+            PlayerGameplayInputReader readerB = resources.ReaderB;
+            PlayerGameplayInputBindingToken bindingB = readerB != null
+                ? readerB.CurrentBindingToken
+                : default;
+
+            SessionPlayerLeaveResult leaveA = access.RequestLeave(
+                new SessionPlayerLeaveRequest(
+                    resources.SlotA,
+                    previousRevisionA,
+                    Source,
+                    "player-qa-input-ownership-leave-a"));
+            if (!proof.Check(
+                    leaveA != null && leaveA.Succeeded,
+                    "Leave A succeeded",
+                    leaveA == null ? "null" : $"{leaveA.Status} {leaveA.Message}",
+                    "ADR-025 Leave A must use the public SlotId + occurrence revision contract."))
+            {
+                yield break;
+            }
+
+            yield return WaitUntil(
+                proof,
+                () => TryFindSlot(fixture, resources.SlotA, out PlayerSessionScopedSlotObservation afterA) &&
+                      TryFindSlot(fixture, resources.SlotB, out PlayerSessionScopedSlotObservation afterB) &&
+                      !afterA.IsJoined &&
+                      !afterA.HasHostEvidence &&
+                      !afterA.HasInputOwnershipEvidence &&
+                      !afterA.HasGameplayAdmissionEvidence &&
+                      (previousHostA == null) &&
+                      (previousReaderA == null || !previousReaderA.HasCurrentGameplayBinding) &&
+                      afterB.IsJoined &&
+                      afterB.HasHostEvidence &&
+                      afterB.HasInputOwnershipEvidence,
+                () => DescribeLeaveATerminalTimeout(fixture, resources, previousHostA, previousReaderA),
+                "Timed out waiting for Leave A terminal release while keeping B observable.");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            if (!access.TryGetObservation(out PlayerSessionScopedObservationSnapshot postLeaveSnapshot) ||
+                postLeaveSnapshot == null)
+            {
+                proof.Record(
+                    "post-Leave scoped observation",
+                    "unavailable",
+                    "Could not read the fresh observation after Leave A.");
+                yield break;
+            }
+
+            PlayerSessionScopedSlotObservation postA = FindSlot(postLeaveSnapshot, resources.SlotA);
+            PlayerSessionScopedSlotObservation postB = FindSlot(postLeaveSnapshot, resources.SlotB);
+            PlayerSessionScopedSlotObservation historicalA = FindSlot(preLeaveSnapshot, resources.SlotA);
+            PlayerSessionScopedSlotObservation historicalB = FindSlot(preLeaveSnapshot, resources.SlotB);
+            bool snapshotImmutable =
+                !postA.HasInputOwnershipEvidence &&
+                historicalA.HasInputOwnershipEvidence &&
+                OwnershipContainsDevice(historicalA.InputOwnership, resources.DeviceA.deviceId) &&
+                historicalB.HasInputOwnershipEvidence &&
+                OwnershipContainsDevice(historicalB.InputOwnership, resources.DeviceB.deviceId);
+            resources.SnapshotImmutable = snapshotImmutable;
+            if (!proof.Check(
+                    snapshotImmutable,
+                    "old snapshot keeps A ownership; new snapshot does not",
+                    $"postAOwnership={postA.HasInputOwnershipEvidence} " +
+                    $"historicalAOwnership={historicalA.HasInputOwnershipEvidence} " +
+                    $"historicalBOwnership={historicalB.HasInputOwnershipEvidence}",
+                    "Leave A must not mutate the retained historical snapshot."))
+            {
+                yield break;
+            }
+
+            resources.RevisionBAfterLeaveA = postB.Slot.Revision;
+
+            bool bHasHostEvidence = postB.HasHostEvidence;
+            bool bHostBindingMatches =
+                bHasHostEvidence &&
+                postB.HostEvidence.HostBindingIdentity.Equals(resources.HostBindingB);
+            bool bAssignmentMatches =
+                bHasHostEvidence &&
+                postB.HostEvidence.AssignmentToken.Equals(resources.AssignmentB);
+            bool bHostReferenceAlive = hostB != null;
+            bool bHostIsJoined =
+                bHostReferenceAlive &&
+                hostB.IsJoined;
+            bool bHostPreserved =
+                bHasHostEvidence &&
+                bHostBindingMatches &&
+                bAssignmentMatches &&
+                bHostReferenceAlive &&
+                bHostIsJoined;
+            string bCurrentHostBindingIdentity = bHasHostEvidence
+                ? postB.HostEvidence.HostBindingIdentity.ToString()
+                : "<none>";
+            string bExpectedHostBindingIdentity = resources.HostBindingB.ToString();
+            string bCurrentAssignmentToken = bHasHostEvidence
+                ? postB.HostEvidence.AssignmentToken.ToString()
+                : "<none>";
+            string bExpectedAssignmentToken = resources.AssignmentB.ToString();
+            bool bOwnershipPreserved =
+                postB.HasInputOwnershipEvidence &&
+                OwnershipContainsDevice(postB.InputOwnership, resources.DeviceB.deviceId) &&
+                !OwnershipContainsDevice(postB.InputOwnership, resources.DeviceA.deviceId);
+            bool bReaderPreserved =
+                readerB != null &&
+                readerB.HasCurrentGameplayBinding &&
+                readerB.CurrentBindingToken == bindingB &&
+                postB.HasGameplayAdmissionEvidence &&
+                postB.GameplayAdmission.InputBindingToken == readerB.CurrentBindingToken;
+            resources.BHasHostEvidence = bHasHostEvidence;
+            resources.BHostBindingMatches = bHostBindingMatches;
+            resources.BAssignmentMatches = bAssignmentMatches;
+            resources.BHostReferenceAlive = bHostReferenceAlive;
+            resources.BHostIsJoined = bHostIsJoined;
+            resources.BCurrentHostBindingIdentity = bCurrentHostBindingIdentity;
+            resources.BExpectedHostBindingIdentity = bExpectedHostBindingIdentity;
+            resources.BCurrentAssignmentToken = bCurrentAssignmentToken;
+            resources.BExpectedAssignmentToken = bExpectedAssignmentToken;
+            resources.BHostPreserved = bHostPreserved;
+            resources.BOwnershipPreserved = bOwnershipPreserved;
+            resources.BReaderPreserved = bReaderPreserved;
+
+            bool bPreserved =
+                postB.IsJoined &&
+                postB.Slot.PlayerSlotId == resources.SlotB &&
+                bHostPreserved &&
+                bOwnershipPreserved &&
+                bReaderPreserved;
+            resources.BPreserved = bPreserved;
+            if (!proof.Check(
+                    bPreserved,
+                    "B remains the same current occurrence after Leave A",
+                    $"joined={postB.IsJoined} hostPreserved={bHostPreserved} " +
+                    $"bHasHostEvidence={bHasHostEvidence} bHostBindingMatches={bHostBindingMatches} " +
+                    $"bAssignmentMatches={bAssignmentMatches} bHostReferenceAlive={bHostReferenceAlive} " +
+                    $"bHostIsJoined={bHostIsJoined} " +
+                    $"bCurrentHostBindingIdentity={bCurrentHostBindingIdentity} " +
+                    $"bExpectedHostBindingIdentity={bExpectedHostBindingIdentity} " +
+                    $"bCurrentAssignmentToken={bCurrentAssignmentToken} " +
+                    $"bExpectedAssignmentToken={bExpectedAssignmentToken} " +
+                    $"ownershipPreserved={bOwnershipPreserved} readerPreserved={bReaderPreserved} " +
+                    $"revisionBeforeLeaveA={previousRevisionB} revisionAfterLeaveA={postB.Slot.Revision}",
+                    "Leave A must preserve Player B Host, ownership and reader binding; Slot revision is diagnostic, not an occurrence identity."))
+            {
+                yield break;
+            }
+
+            NeutralizeInputOwnershipKeyboards(resources);
+            QueueKeyboardSpace(resources.DeviceB, true);
+            InputSystem.Update();
+            yield return null;
+            bool bStillDriven = ReaderIsPressed(readerB, resources.ActivateReference);
+            resources.BInputOperational = bStillDriven;
+            NeutralizeInputOwnershipKeyboards(resources);
+            if (!proof.Check(
+                    bStillDriven,
+                    "Device B still drives Reader B after Leave A",
+                    "inactive",
+                    "Leave A must not stop Device B from driving Reader B."))
+            {
+                yield break;
+            }
+
+            resources.LeaveA = true;
+            fixture.JoinCommand.InvokeFromDevice(resources.DeviceA);
+            LocalPlayerJoinResult rejoinA = fixture.JoinCommand.LastJoinResult;
+            if (!proof.Check(
+                    rejoinA != null &&
+                    rejoinA.Succeeded &&
+                    rejoinA.LocalPlayerHost != null &&
+                    rejoinA.PlayerInput != null,
+                    "Rejoin A succeeded through InvokeFromDevice(deviceA)",
+                    rejoinA == null ? "null" : $"{rejoinA.Status} {rejoinA.Message}",
+                    "Rejoin A must use the same explicit-device Join surface."))
+            {
+                yield break;
+            }
+
+            resources.SlotA = rejoinA.Slot.PlayerSlotId;
+            resources.RevisionA = rejoinA.Slot.Revision;
+            resources.HostA = rejoinA.LocalPlayerHost;
+            resources.PlayerInputA = rejoinA.PlayerInput;
+            yield return WaitUntil(
+                proof,
+                () => TryFindSlot(fixture, resources.SlotA, out PlayerSessionScopedSlotObservation rejoined) &&
+                      rejoined.IsJoined &&
+                      rejoined.HasHostEvidence &&
+                      rejoined.HasInputOwnershipEvidence,
+                "Timed out waiting for rejoined A current observation.");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            if (!access.TryGetObservation(out PlayerSessionScopedObservationSnapshot afterRejoin) ||
+                afterRejoin == null)
+            {
+                proof.Record("observation after Rejoin A", "unavailable", "Could not observe rejoined A.");
+                yield break;
+            }
+
+            PlayerSessionScopedSlotObservation currentA = FindSlot(afterRejoin, resources.SlotA);
+            PlayerSessionScopedSlotObservation currentB = FindSlot(afterRejoin, resources.SlotB);
+            bool freshOccurrence =
+                currentA.Slot.Revision > previousRevisionA &&
+                resources.HostA != null &&
+                !ReferenceEquals(resources.HostA, previousHostA) &&
+                currentA.HasInputOwnershipEvidence &&
+                OwnershipContainsDevice(currentA.InputOwnership, resources.DeviceA.deviceId) &&
+                !OwnershipContainsDevice(currentA.InputOwnership, resources.DeviceB.deviceId) &&
+                (!previousHostBindingA.IsValid ||
+                 !currentA.HostEvidence.HostBindingIdentity.Equals(previousHostBindingA) ||
+                 !currentA.HostEvidence.AssignmentToken.Equals(previousAssignmentA));
+            bool staleRejected =
+                currentA.Slot.Revision != previousRevisionA &&
+                !ReferenceEquals(resources.HostA, previousHostA) &&
+                (previousBindingA.IsValid
+                    ? !currentA.HasGameplayAdmissionEvidence ||
+                      currentA.GameplayAdmission.InputBindingToken != previousBindingA
+                    : true);
+            resources.RejoinA = freshOccurrence;
+            resources.StaleOwnershipRejected = staleRejected;
+            if (!proof.Check(
+                    freshOccurrence && staleRejected,
+                    "rejoined A is a new Host/occurrence and is not the pre-Leave correlation",
+                    $"previousRevision={previousRevisionA} currentRevision={currentA.Slot.Revision} " +
+                    $"sameHost={ReferenceEquals(resources.HostA, previousHostA)} " +
+                    $"hostBindingEqual={currentA.HostEvidence.HostBindingIdentity.Equals(previousHostBindingA)}",
+                    "Rejoin A must publish a fresh current occurrence without sourcing ownership from the old snapshot."))
+            {
+                yield break;
+            }
+
+            bool bUnchangedHostPreserved =
+                currentB.HasHostEvidence &&
+                currentB.HostEvidence.HostBindingIdentity.Equals(resources.HostBindingB) &&
+                currentB.HostEvidence.AssignmentToken.Equals(resources.AssignmentB) &&
+                hostB != null &&
+                hostB.IsJoined;
+            bool bUnchangedOwnershipPreserved =
+                currentB.HasInputOwnershipEvidence &&
+                OwnershipContainsDevice(currentB.InputOwnership, resources.DeviceB.deviceId) &&
+                !OwnershipContainsDevice(currentB.InputOwnership, resources.DeviceA.deviceId);
+            bool bUnchangedReaderPreserved =
+                readerB != null &&
+                readerB.HasCurrentGameplayBinding &&
+                readerB.CurrentBindingToken == bindingB;
+            bool bUnchanged =
+                currentB.IsJoined &&
+                currentB.Slot.PlayerSlotId == resources.SlotB &&
+                bUnchangedHostPreserved &&
+                bUnchangedOwnershipPreserved &&
+                bUnchangedReaderPreserved;
+            proof.Check(
+                bUnchanged,
+                "B unchanged through Rejoin A",
+                $"joined={currentB.IsJoined} hostPreserved={bUnchangedHostPreserved} " +
+                $"ownershipPreserved={bUnchangedOwnershipPreserved} readerPreserved={bUnchangedReaderPreserved} " +
+                $"sameHostRef={ReferenceEquals(resources.HostB, hostB)} " +
+                $"revisionBeforeLeaveA={previousRevisionB} revisionAfterRejoinA={currentB.Slot.Revision}",
+                "Rejoin A must not recreate or disturb Player B; Slot revision is diagnostic, not an occurrence identity.");
+        }
+
+        private static IEnumerator CleanupInputOwnership(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources,
+            InputOwnershipCleanup cleanup)
+        {
+            NeutralizeInputOwnershipKeyboards(resources);
+
+            if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string accessIssue))
+            {
+                cleanup.Record($"cleanup could not get Session access: {accessIssue}");
+            }
+            else
+            {
+                yield return LeaveInputOwnershipSlotIfJoined(
+                    fixture, access, resources.SlotA, cleanup, "A");
+                yield return LeaveInputOwnershipSlotIfJoined(
+                    fixture, access, resources.SlotB, cleanup, "B");
+                yield return WaitUntilCleanup(
+                    cleanup,
+                    () => (!resources.SlotA.IsValid || SlotHasNoCurrentPlayer(fixture, resources.SlotA)) &&
+                          (!resources.SlotB.IsValid || SlotHasNoCurrentPlayer(fixture, resources.SlotB)),
+                    "Timed out waiting for ADR-025 Players to release during cleanup.");
+            }
+
+            if (resources.ActivateReference != null)
+            {
+                UnityEngine.Object.Destroy(resources.ActivateReference);
+                resources.ActivateReference = null;
+            }
+
+            RemoveOwnedDevice(resources.DeviceA);
+            RemoveOwnedDevice(resources.DeviceB);
+            RemoveOwnedDevice(resources.RemovedProbe);
+
+            bool devicesRemoved =
+                (resources.DeviceA == null || !resources.DeviceA.added) &&
+                (resources.DeviceB == null || !resources.DeviceB.added) &&
+                (resources.RemovedProbe == null || !resources.RemovedProbe.added);
+            bool joiningOpen = TryGetAccess(fixture, out IPlayerSessionScopedAccess joiningAccess, out _) &&
+                joiningAccess.TryGetObservation(out PlayerSessionScopedObservationSnapshot observation) &&
+                observation != null &&
+                observation.Participation != null &&
+                observation.Participation.JoiningOpen;
+            bool noAdrPlayers =
+                SlotHasNoCurrentPlayer(fixture, resources.SlotA) &&
+                SlotHasNoCurrentPlayer(fixture, resources.SlotB);
+            if (!devicesRemoved || !joiningOpen || !noAdrPlayers)
+            {
+                cleanup.Record(
+                    $"cleanup residual state devicesRemoved={devicesRemoved} joiningOpen={joiningOpen} " +
+                    $"noAdrPlayers={noAdrPlayers} " +
+                    $"joined='{DescribeJoinedOwnership(fixture)}'");
+            }
+            else
+            {
+                resources.CleanupSucceeded = true;
+            }
+        }
+
+        private static IEnumerator LeaveInputOwnershipSlotIfJoined(
+            PlayerQaPanel fixture,
+            IPlayerSessionScopedAccess access,
+            PlayerSlotId slotId,
+            InputOwnershipCleanup cleanup,
+            string label)
+        {
+            if (!slotId.IsValid ||
+                !TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation current) ||
+                !current.IsJoined)
+            {
+                yield break;
+            }
+
+            SessionPlayerLeaveResult leave = access.RequestLeave(
+                new SessionPlayerLeaveRequest(
+                    slotId,
+                    current.Slot.Revision,
+                    Source,
+                    $"player-qa-input-ownership-cleanup-{label}"));
+            if (leave == null || !leave.Succeeded)
+            {
+                cleanup.Record(
+                    $"cleanup Leave {label} failed: " +
+                    (leave == null ? "null" : $"{leave.Status} {leave.Message}"));
+            }
+
+            yield return null;
+        }
+
+        private static void LastResortCleanupInputOwnership(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources)
+        {
+            NeutralizeInputOwnershipKeyboards(resources);
+            if (TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out _))
+            {
+                LeaveInputOwnershipSlotNow(fixture, access, resources.SlotA);
+                LeaveInputOwnershipSlotNow(fixture, access, resources.SlotB);
+            }
+
+            if (resources.ActivateReference != null)
+            {
+                UnityEngine.Object.Destroy(resources.ActivateReference);
+                resources.ActivateReference = null;
+            }
+
+            RemoveOwnedDevice(resources.DeviceA);
+            RemoveOwnedDevice(resources.DeviceB);
+            RemoveOwnedDevice(resources.RemovedProbe);
+        }
+
+        private static void LeaveInputOwnershipSlotNow(
+            PlayerQaPanel fixture,
+            IPlayerSessionScopedAccess access,
+            PlayerSlotId slotId)
+        {
+            if (!slotId.IsValid ||
+                !TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation current) ||
+                !current.IsJoined)
+            {
+                return;
+            }
+
+            access.RequestLeave(
+                new SessionPlayerLeaveRequest(
+                    slotId,
+                    current.Slot.Revision,
+                    Source,
+                    "player-qa-input-ownership-last-resort-leave"));
+        }
+
+        private static void ApplyInputOwnershipResult(
+            Result result,
+            InputOwnershipProof proof,
+            InputOwnershipCleanup cleanup,
+            PlayerQaPanel fixture)
+        {
+            if (proof.HasFailure)
+            {
+                result.Fail("input-ownership", proof.Expected, proof.Actual, proof.Message);
+                if (cleanup.Failed)
+                {
+                    Debug.LogError(
+                        $"[QA_PLAYER_INPUT_OWNERSHIP] cleanup='failed' " +
+                        $"primary='{proof.Message}' cleanup='{cleanup.Failure}'",
+                        fixture);
+                }
+
+                return;
+            }
+
+            if (cleanup.Failed)
+            {
+                result.Fail(
+                    "input-ownership",
+                    "cleanup succeeded",
+                    "cleanup failed",
+                    cleanup.Failure);
+            }
+        }
+
+        private static void EmitInputOwnershipDiagnostic(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources,
+            InputOwnershipProof proof,
+            InputOwnershipCleanup cleanup)
+        {
+            Debug.Log(
+                "[QA_PLAYER_INPUT_OWNERSHIP] " +
+                $"slotA='{(resources.SlotA.IsValid ? resources.SlotA.StableText : "none")}' " +
+                $"slotB='{(resources.SlotB.IsValid ? resources.SlotB.StableText : "none")}' " +
+                $"revisionA='{resources.RevisionA}' revisionB='{resources.RevisionB}' " +
+                $"deviceAId='{(resources.DeviceA != null ? resources.DeviceA.deviceId.ToString() : "none")}' " +
+                $"deviceBId='{(resources.DeviceB != null ? resources.DeviceB.deviceId.ToString() : "none")}' " +
+                $"playerIndexA='{resources.PlayerIndexA}' playerIndexB='{resources.PlayerIndexB}' " +
+                $"aToA='{resources.AToA}' aToB='{resources.AToB}' bToB='{resources.BToB}' bToA='{resources.BToA}' " +
+                $"bindingA='{(resources.BindingA.IsValid ? resources.BindingA.StableText : "none")}' " +
+                $"bindingB='{(resources.BindingB.IsValid ? resources.BindingB.StableText : "none")}' " +
+                $"activityRequestOutcome='{DescribeDiagnostic(resources.ActivityRequestOutcome)}' " +
+                $"activityState='{DescribeDiagnostic(resources.ActivityState)}' " +
+                $"activityReadiness='{DescribeDiagnostic(resources.ActivityReadiness)}' " +
+                $"blockingIssueCount='{DescribeDiagnostic(resources.BlockingIssueCount)}' " +
+                $"slotAExpectedActor='{DescribeDiagnostic(resources.SlotAExpectedActor)}' " +
+                $"slotASelectedActor='{DescribeDiagnostic(resources.SlotASelectedActor)}' " +
+                $"slotAPrepared='{resources.SlotAPrepared}' slotAMaterialized='{resources.SlotAMaterialized}' " +
+                $"slotAHasGameplayAdmission='{resources.SlotAHasGameplayAdmission}' " +
+                $"slotAGameplayReady='{resources.SlotAGameplayReady}' " +
+                $"slotBExpectedActor='{DescribeDiagnostic(resources.SlotBExpectedActor)}' " +
+                $"slotBSelectedActor='{DescribeDiagnostic(resources.SlotBSelectedActor)}' " +
+                $"slotBPrepared='{resources.SlotBPrepared}' slotBMaterialized='{resources.SlotBMaterialized}' " +
+                $"slotBHasGameplayAdmission='{resources.SlotBHasGameplayAdmission}' " +
+                $"slotBGameplayReady='{resources.SlotBGameplayReady}' " +
+                $"blockingFailureKind='{DescribeDiagnostic(resources.BlockingFailureKind)}' " +
+                $"blockingFailureMessage='{DescribeDiagnostic(resources.BlockingFailureMessage)}' " +
+                $"blockingFailureOwner='{DescribeDiagnostic(resources.BlockingFailureOwner)}' " +
+                $"leaveA='{resources.LeaveA}' bPreserved='{resources.BPreserved}' " +
+                $"snapshotImmutable='{resources.SnapshotImmutable}' rejoinA='{resources.RejoinA}' " +
+                $"staleOwnershipRejected='{resources.StaleOwnershipRejected}' " +
+                $"bRevisionBeforeLeaveA='{resources.RevisionBBeforeLeaveA}' bRevisionAfterLeaveA='{resources.RevisionBAfterLeaveA}' " +
+                $"bHostPreserved='{resources.BHostPreserved}' " +
+                $"bHasHostEvidence='{resources.BHasHostEvidence}' " +
+                $"bHostBindingMatches='{resources.BHostBindingMatches}' " +
+                $"bAssignmentMatches='{resources.BAssignmentMatches}' " +
+                $"bHostReferenceAlive='{resources.BHostReferenceAlive}' " +
+                $"bHostIsJoined='{resources.BHostIsJoined}' " +
+                $"bCurrentHostBindingIdentity='{EscapeDiagnosticValue(resources.BCurrentHostBindingIdentity)}' " +
+                $"bExpectedHostBindingIdentity='{EscapeDiagnosticValue(resources.BExpectedHostBindingIdentity)}' " +
+                $"bCurrentAssignmentToken='{EscapeDiagnosticValue(resources.BCurrentAssignmentToken)}' " +
+                $"bExpectedAssignmentToken='{EscapeDiagnosticValue(resources.BExpectedAssignmentToken)}' " +
+                $"bOwnershipPreserved='{resources.BOwnershipPreserved}' " +
+                $"bReaderPreserved='{resources.BReaderPreserved}' bInputOperational='{resources.BInputOperational}' " +
+                $"cleanup='{(cleanup.Failed ? "failed" : resources.CleanupSucceeded ? "succeeded" : "incomplete")}' " +
+                $"proof='{(proof.HasFailure ? "failed" : "succeeded")}'.",
+                fixture);
+        }
+
+        private static IEnumerator WaitUntil(
+            InputOwnershipProof proof,
+            Func<bool> predicate,
+            string timeoutMessage)
+        {
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            for (int frame = 0; frame < FrameBudget; frame++)
+            {
+                if (predicate())
+                {
+                    yield break;
+                }
+
+                yield return null;
+            }
+
+            proof.Record("condition met", "timeout", timeoutMessage);
+        }
+
+        private static IEnumerator WaitUntil(
+            InputOwnershipProof proof,
+            Func<bool> predicate,
+            Func<string> timeoutDiagnostic,
+            string timeoutMessage)
+        {
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            for (int frame = 0; frame < FrameBudget; frame++)
+            {
+                if (predicate())
+                {
+                    yield break;
+                }
+
+                yield return null;
+            }
+
+            proof.Record(
+                "condition met",
+                timeoutDiagnostic != null ? timeoutDiagnostic() : "timeout",
+                timeoutMessage);
+        }
+
+        private static IEnumerator WaitUntilCleanup(
+            InputOwnershipCleanup cleanup,
+            Func<bool> predicate,
+            string timeoutMessage)
+        {
+            for (int frame = 0; frame < FrameBudget; frame++)
+            {
+                if (predicate())
+                {
+                    yield break;
+                }
+
+                yield return null;
+            }
+
+            cleanup.Record(timeoutMessage);
+        }
+
+        private static bool IsRejectedInvalidDeviceJoin(PlayerSessionJoinCommandTrigger joinCommand)
+        {
+            LocalPlayerJoinResult join = joinCommand != null ? joinCommand.LastJoinResult : null;
+            return join != null &&
+                join.Status == LocalPlayerJoinStatus.RejectedInvalidRequest &&
+                string.Equals(joinCommand.LastOutcome, "Rejected", StringComparison.Ordinal) &&
+                join.LocalPlayerHost == null &&
+                !join.HasLocalPlayerHostEvidence;
+        }
+
+        private static bool AnyJoinedOwnership(PlayerQaPanel fixture)
+        {
+            return (TryFindSlot(fixture, ExpectedSlotId(fixture), out PlayerSessionScopedSlotObservation p1) &&
+                    (p1.IsJoined || p1.HasHostEvidence || p1.HasInputOwnershipEvidence)) ||
+                   (TryFindSlot(fixture, ExpectedSlotTwoId(fixture), out PlayerSessionScopedSlotObservation p2) &&
+                    (p2.IsJoined || p2.HasHostEvidence || p2.HasInputOwnershipEvidence));
+        }
+
+        private static string DescribeJoinedOwnership(PlayerQaPanel fixture)
+        {
+            bool p1Found = TryFindSlot(
+                fixture, ExpectedSlotId(fixture), out PlayerSessionScopedSlotObservation p1);
+            bool p2Found = TryFindSlot(
+                fixture, ExpectedSlotTwoId(fixture), out PlayerSessionScopedSlotObservation p2);
+            return $"p1Joined={(p1Found && p1.IsJoined)} p1Host={(p1Found && p1.HasHostEvidence)} " +
+                   $"p1Ownership={(p1Found && p1.HasInputOwnershipEvidence)} " +
+                   $"p2Joined={(p2Found && p2.IsJoined)} p2Host={(p2Found && p2.HasHostEvidence)} " +
+                   $"p2Ownership={(p2Found && p2.HasInputOwnershipEvidence)}";
+        }
+
+        private static bool OwnershipContainsDevice(
+            LocalPlayerInputOwnershipSummary ownership,
+            int deviceId)
+        {
+            IReadOnlyList<LocalPlayerInputDeviceSummary> devices = ownership.Devices;
+            for (int index = 0; index < devices.Count; index++)
+            {
+                if (devices[index].DeviceId == deviceId)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string DescribeOwnershipDeviceIds(LocalPlayerInputOwnershipSummary ownership)
+        {
+            IReadOnlyList<LocalPlayerInputDeviceSummary> devices = ownership.Devices;
+            if (devices.Count == 0)
+            {
+                return "none";
+            }
+
+            string[] ids = new string[devices.Count];
+            for (int index = 0; index < devices.Count; index++)
+            {
+                ids[index] = devices[index].DeviceId.ToString();
+            }
+
+            return string.Join(",", ids);
+        }
+
+        private static string DescribeLeaveATerminalTimeout(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources,
+            LocalPlayerHostAuthoring previousHostA,
+            PlayerGameplayInputReader previousReaderA)
+        {
+            bool foundA = TryFindSlot(fixture, resources.SlotA, out PlayerSessionScopedSlotObservation diagA);
+            bool foundB = TryFindSlot(fixture, resources.SlotB, out PlayerSessionScopedSlotObservation diagB);
+            string aPart = foundA
+                ? $"aJoined={diagA.IsJoined} aHasHostEvidence={diagA.HasHostEvidence} " +
+                  $"aHasInputOwnershipEvidence={diagA.HasInputOwnershipEvidence} " +
+                  $"aHasGameplayAdmissionEvidence={diagA.HasGameplayAdmissionEvidence}"
+                : "aSlot=notFound";
+            string bPart = foundB
+                ? $"bJoined={diagB.IsJoined} bHasHostEvidence={diagB.HasHostEvidence} " +
+                  $"bHasInputOwnershipEvidence={diagB.HasInputOwnershipEvidence} " +
+                  $"bCurrentHostBindingIdentity={(diagB.HasHostEvidence && diagB.HostEvidence.HostBindingIdentity.IsValid ? diagB.HostEvidence.HostBindingIdentity.StableText : "none")} " +
+                  $"bExpectedHostBindingIdentity={(resources.HostBindingB.IsValid ? resources.HostBindingB.StableText : "none")} " +
+                  $"bCurrentAssignmentToken={(diagB.HasHostEvidence && diagB.HostEvidence.AssignmentToken.IsValid ? diagB.HostEvidence.AssignmentToken.StableText : "none")} " +
+                  $"bExpectedAssignmentToken={(resources.AssignmentB.IsValid ? resources.AssignmentB.StableText : "none")} " +
+                  $"bCurrentDeviceIds={DescribeOwnershipDeviceIds(diagB.InputOwnership)} " +
+                  $"bExpectedDeviceId={(resources.DeviceB != null ? resources.DeviceB.deviceId.ToString() : "none")} " +
+                  $"bCurrentPlayerIndex={(diagB.HasInputOwnershipEvidence ? diagB.InputOwnership.UnityPlayerIndex.ToString() : "unavailable")} " +
+                  $"bExpectedPlayerIndex={resources.PlayerIndexB}"
+                : "bSlot=notFound";
+            return $"previousHostAAlive={(previousHostA != null)} " +
+                $"previousReaderAHasGameplayBinding={(previousReaderA != null && previousReaderA.HasCurrentGameplayBinding)} " +
+                $"{aPart} {bPart}";
+        }
+
+        private static string EffectiveControlScheme(PlayerInput playerInput)
+        {
+            return playerInput != null
+                ? playerInput.currentControlScheme ?? string.Empty
+                : string.Empty;
+        }
+
+        private static bool IsInputOwnershipSlotGameplayReady(
+            PlayerQaPanel fixture,
+            PlayerSlotId slotId)
+        {
+            ActorProfile expected = ResolveConfiguredDefaultActor(fixture, slotId);
+            return expected != null &&
+                TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation slot) &&
+                slot.IsJoined &&
+                slot.HasHostEvidence &&
+                slot.Slot.SelectedActorProfile == expected &&
+                slot.IsLogicalActorPrepared &&
+                slot.IsPhysicallyMaterialized &&
+                slot.HasGameplayAdmissionEvidence &&
+                slot.GameplayAdmission.IsAdmitted &&
+                slot.GameplayAdmission.GameplayReady;
+        }
+
+        private static ActorProfile ResolveConfiguredDefaultActor(
+            PlayerQaPanel fixture,
+            PlayerSlotId slotId)
+        {
+            if (fixture == null || !slotId.IsValid)
+            {
+                return null;
+            }
+
+            if (fixture.PlayerOneSlot != null &&
+                fixture.PlayerOneSlot.TryGetPlayerSlotId(out PlayerSlotId playerOne, out _) &&
+                playerOne == slotId)
+            {
+                return fixture.PlayerOneSlot.DefaultActorProfile;
+            }
+
+            if (fixture.PlayerTwoSlot != null &&
+                fixture.PlayerTwoSlot.TryGetPlayerSlotId(out PlayerSlotId playerTwo, out _) &&
+                playerTwo == slotId)
+            {
+                return fixture.PlayerTwoSlot.DefaultActorProfile;
+            }
+
+            return null;
+        }
+
+        private static void CaptureInputOwnershipGameplayReadyRequest(
+            InputOwnershipResources resources,
+            ActivityRequestTrigger trigger)
+        {
+            resources.ActivityRequestOutcome = trigger != null
+                ? trigger.LastOutcome.ToString()
+                : string.Empty;
+            resources.BlockingFailureMessage = trigger != null
+                ? trigger.LastMessage
+                : string.Empty;
+            resources.ActivityState = ExtractQuotedDiagnostic(
+                resources.BlockingFailureMessage, "activityState");
+            resources.ActivityReadiness = ExtractQuotedDiagnostic(
+                resources.BlockingFailureMessage, "activityReadiness");
+            resources.BlockingIssueCount = ExtractQuotedDiagnostic(
+                resources.BlockingFailureMessage, "activityReadinessIssues");
+            if (string.IsNullOrEmpty(resources.BlockingIssueCount))
+            {
+                resources.BlockingIssueCount = ExtractQuotedDiagnostic(
+                    resources.BlockingFailureMessage,
+                    "activityContentExecutionBlockingIssues");
+            }
+
+            resources.BlockingFailureKind = ExtractQuotedDiagnostic(
+                resources.BlockingFailureMessage, "activityReadinessReason");
+            resources.BlockingFailureOwner = string.Empty;
+        }
+
+        private static void CaptureInputOwnershipSlotGameplayEvidence(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources)
+        {
+            CaptureInputOwnershipSlotGameplayEvidence(
+                fixture,
+                resources.SlotA,
+                out resources.SlotAExpectedActor,
+                out resources.SlotASelectedActor,
+                out resources.SlotAPrepared,
+                out resources.SlotAMaterialized,
+                out resources.SlotAHasGameplayAdmission,
+                out resources.SlotAGameplayReady);
+            CaptureInputOwnershipSlotGameplayEvidence(
+                fixture,
+                resources.SlotB,
+                out resources.SlotBExpectedActor,
+                out resources.SlotBSelectedActor,
+                out resources.SlotBPrepared,
+                out resources.SlotBMaterialized,
+                out resources.SlotBHasGameplayAdmission,
+                out resources.SlotBGameplayReady);
+        }
+
+        private static void CaptureInputOwnershipSlotGameplayEvidence(
+            PlayerQaPanel fixture,
+            PlayerSlotId slotId,
+            out string expectedActor,
+            out string selectedActor,
+            out bool prepared,
+            out bool materialized,
+            out bool hasGameplayAdmission,
+            out bool gameplayReady)
+        {
+            expectedActor = DescribeObject(ResolveConfiguredDefaultActor(fixture, slotId));
+            selectedActor = "unavailable";
+            prepared = false;
+            materialized = false;
+            hasGameplayAdmission = false;
+            gameplayReady = false;
+            if (!TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation slot))
+            {
+                return;
+            }
+
+            selectedActor = DescribeObject(slot.Slot.SelectedActorProfile);
+            prepared = slot.IsLogicalActorPrepared;
+            materialized = slot.IsPhysicallyMaterialized;
+            hasGameplayAdmission = slot.HasGameplayAdmissionEvidence &&
+                slot.GameplayAdmission.IsAdmitted;
+            gameplayReady = slot.HasGameplayAdmissionEvidence &&
+                slot.GameplayAdmission.GameplayReady;
+        }
+
+        private static bool IsInputOwnershipGameplayReadyBlocked(
+            InputOwnershipResources resources)
+        {
+            return string.Equals(resources.ActivityReadiness, "NotReady", StringComparison.Ordinal) ||
+                (!string.IsNullOrEmpty(resources.BlockingIssueCount) &&
+                 resources.BlockingIssueCount != "0" &&
+                 resources.BlockingIssueCount != "unavailable");
+        }
+
+        private static void EmitInputOwnershipGameplayReadyDiagnostic(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources)
+        {
+            Debug.Log(
+                "[QA_PLAYER_INPUT_OWNERSHIP] " +
+                "gameplayReady='blocked-or-incomplete' " +
+                $"activityRequestOutcome='{DescribeDiagnostic(resources.ActivityRequestOutcome)}' " +
+                $"activityState='{DescribeDiagnostic(resources.ActivityState)}' " +
+                $"activityReadiness='{DescribeDiagnostic(resources.ActivityReadiness)}' " +
+                $"blockingIssueCount='{DescribeDiagnostic(resources.BlockingIssueCount)}' " +
+                $"slotA='{(resources.SlotA.IsValid ? resources.SlotA.StableText : "none")}' " +
+                $"slotAExpectedActor='{DescribeDiagnostic(resources.SlotAExpectedActor)}' " +
+                $"slotASelectedActor='{DescribeDiagnostic(resources.SlotASelectedActor)}' " +
+                $"slotAPrepared='{resources.SlotAPrepared}' slotAMaterialized='{resources.SlotAMaterialized}' " +
+                $"slotAHasGameplayAdmission='{resources.SlotAHasGameplayAdmission}' " +
+                $"slotAGameplayReady='{resources.SlotAGameplayReady}' " +
+                $"slotB='{(resources.SlotB.IsValid ? resources.SlotB.StableText : "none")}' " +
+                $"slotBExpectedActor='{DescribeDiagnostic(resources.SlotBExpectedActor)}' " +
+                $"slotBSelectedActor='{DescribeDiagnostic(resources.SlotBSelectedActor)}' " +
+                $"slotBPrepared='{resources.SlotBPrepared}' slotBMaterialized='{resources.SlotBMaterialized}' " +
+                $"slotBHasGameplayAdmission='{resources.SlotBHasGameplayAdmission}' " +
+                $"slotBGameplayReady='{resources.SlotBGameplayReady}' " +
+                $"blockingFailureKind='{DescribeDiagnostic(resources.BlockingFailureKind)}' " +
+                $"blockingFailureMessage='{DescribeDiagnostic(resources.BlockingFailureMessage)}' " +
+                $"blockingFailureOwner='{DescribeDiagnostic(resources.BlockingFailureOwner)}'.",
+                fixture);
+        }
+
+        private static string ExtractQuotedDiagnostic(string source, string fieldName)
+        {
+            if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(fieldName))
+            {
+                return string.Empty;
+            }
+
+            string token = fieldName + "='";
+            int start = source.IndexOf(token, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                return string.Empty;
+            }
+
+            start += token.Length;
+            int end = source.IndexOf('\'', start);
+            if (end < 0)
+            {
+                return string.Empty;
+            }
+
+            return source.Substring(start, end - start);
+        }
+
+        private static string DescribeDiagnostic(string value)
+        {
+            return string.IsNullOrEmpty(value) ? "unavailable" : value;
+        }
+
+        private static bool ReaderIsPressed(
+            PlayerGameplayInputReader reader,
+            InputActionReference action)
+        {
+            return reader != null &&
+                reader.TryIsPressed(action, out bool isPressed) &&
+                isPressed;
+        }
+
+        private static void NeutralizeInputOwnershipKeyboards(InputOwnershipResources resources)
+        {
+            QueueKeyboardSpace(resources.DeviceA, false);
+            QueueKeyboardSpace(resources.DeviceB, false);
+            if (resources.RemovedProbe != null && resources.RemovedProbe.added)
+            {
+                QueueKeyboardSpace(resources.RemovedProbe, false);
+            }
+
+            InputSystem.Update();
+        }
+
+        private static void QueueKeyboardSpace(Keyboard device, bool pressed)
+        {
+            if (device == null || !device.added)
+            {
+                return;
+            }
+
+            if (pressed)
+            {
+                InputSystem.QueueStateEvent(device, new KeyboardState(Key.Space));
+                return;
+            }
+
+            InputSystem.QueueStateEvent(device, new KeyboardState());
+        }
+
+        private static void RemoveOwnedDevice(InputDevice device)
+        {
+            if (device != null && device.added)
+            {
+                InputSystem.RemoveDevice(device);
+            }
+        }
+
+        private static bool SlotHasNoCurrentPlayer(PlayerQaPanel fixture, PlayerSlotId slotId)
+        {
+            return !slotId.IsValid ||
+                !TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation slot) ||
+                (!slot.IsJoined && !slot.HasHostEvidence && !slot.HasInputOwnershipEvidence);
+        }
+
+        private sealed class InputOwnershipResources
+        {
+            internal Keyboard OriginalKeyboard;
+            internal Keyboard DeviceA;
+            internal Keyboard DeviceB;
+            internal Keyboard RemovedProbe;
+            internal InputActionReference ActivateReference;
+            internal PlayerSlotId SlotA;
+            internal PlayerSlotId SlotB;
+            internal int RevisionA;
+            internal int RevisionB;
+            internal LocalPlayerHostAuthoring HostA;
+            internal LocalPlayerHostAuthoring HostB;
+            internal PlayerInput PlayerInputA;
+            internal PlayerInput PlayerInputB;
+            internal PlayerGameplayInputReader ReaderA;
+            internal PlayerGameplayInputReader ReaderB;
+            internal PlayerHostBindingIdentity HostBindingA;
+            internal PlayerHostBindingIdentity HostBindingB;
+            internal PlayerSlotAssignmentToken AssignmentA;
+            internal PlayerSlotAssignmentToken AssignmentB;
+            internal PlayerGameplayInputBindingToken BindingA;
+            internal PlayerGameplayInputBindingToken BindingB;
+            internal int PlayerIndexA = -1;
+            internal int PlayerIndexB = -1;
+            internal bool AToA;
+            internal bool AToB;
+            internal bool BToA;
+            internal bool BToB;
+            internal int RevisionBBeforeLeaveA;
+            internal int RevisionBAfterLeaveA;
+            internal bool BHasHostEvidence;
+            internal bool BHostBindingMatches;
+            internal bool BAssignmentMatches;
+            internal bool BHostReferenceAlive;
+            internal bool BHostIsJoined;
+            internal string BCurrentHostBindingIdentity = "<none>";
+            internal string BExpectedHostBindingIdentity = "<none>";
+            internal string BCurrentAssignmentToken = "<none>";
+            internal string BExpectedAssignmentToken = "<none>";
+            internal bool BHostPreserved;
+            internal bool BOwnershipPreserved;
+            internal bool BReaderPreserved;
+            internal bool BInputOperational;
+            internal bool LeaveA;
+            internal bool BPreserved;
+            internal bool SnapshotImmutable;
+            internal bool RejoinA;
+            internal bool StaleOwnershipRejected;
+            internal bool CleanupSucceeded;
+            internal string ActivityRequestOutcome;
+            internal string ActivityState;
+            internal string ActivityReadiness;
+            internal string BlockingIssueCount;
+            internal string BlockingFailureKind;
+            internal string BlockingFailureMessage;
+            internal string BlockingFailureOwner;
+            internal string SlotAExpectedActor;
+            internal string SlotASelectedActor;
+            internal bool SlotAPrepared;
+            internal bool SlotAMaterialized;
+            internal bool SlotAHasGameplayAdmission;
+            internal bool SlotAGameplayReady;
+            internal string SlotBExpectedActor;
+            internal string SlotBSelectedActor;
+            internal bool SlotBPrepared;
+            internal bool SlotBMaterialized;
+            internal bool SlotBHasGameplayAdmission;
+            internal bool SlotBGameplayReady;
+        }
+
+        private sealed class InputOwnershipProof
+        {
+            internal string Expected;
+            internal string Actual;
+            internal string Message;
+            internal bool HasFailure => !string.IsNullOrEmpty(Message);
+
+            internal void Record(string expected, string actual, string message)
+            {
+                if (HasFailure)
+                {
+                    return;
+                }
+
+                Expected = expected;
+                Actual = actual;
+                Message = message;
+            }
+
+            internal bool Check(bool condition, string expected, string actual, string message)
+            {
+                if (!condition)
+                {
+                    Record(expected, actual, message);
+                }
+
+                return !HasFailure;
+            }
+        }
+
+        private sealed class InputOwnershipCleanup
+        {
+            internal string Failure;
+            internal bool Failed => !string.IsNullOrEmpty(Failure);
+
+            internal void Record(string message)
+            {
+                if (Failed)
+                {
+                    return;
+                }
+
+                Failure = message;
+            }
+        }
+
         private static void ProveSpatial(PlayerQaPanel fixture, Result result)
         {
             Require(result, "spatial", fixture.SpatialEntry != null,
@@ -2622,7 +4508,7 @@ namespace ImmersiveFrameworkQA.Player
                 yield break;
             }
 
-            string diagnostic = DescribeSlotObservation(fixture, expected);
+            string diagnostic = DescribeSlotObservation(fixture, expected, caseId, result.PlayerOneHost);
             UnityEngine.Debug.LogError(
                 $"[QA_PLAYER_SLOT_OBSERVATION] case='{caseId}' {diagnostic}",
                 fixture);
@@ -2635,7 +4521,9 @@ namespace ImmersiveFrameworkQA.Player
 
         private static string DescribeSlotObservation(
             PlayerQaPanel fixture,
-            PlayerSlotId expected)
+            PlayerSlotId expected,
+            string caseId,
+            LocalPlayerHostAuthoring retainedQaHost)
         {
             string expectedText = expected.IsValid ? expected.StableText : "<invalid>";
             if (fixture == null || fixture.Observer == null)
@@ -2667,6 +4555,7 @@ namespace ImmersiveFrameworkQA.Player
                 string assignmentOrigin = candidate.HasHostEvidence
                     ? candidate.HostEvidence.AssignmentOrigin.ToString()
                     : "<none>";
+                LogActorLifecycleContextDiagnostic(caseId, fixture, observation, candidate, retainedQaHost);
                 return $"status='timeout' expectedSlot='{expectedText}' " +
                        $"observationAvailable='{observation.IsAvailable}' " +
                        $"observedSlots='{observedSlots}' slotFound='true' " +
@@ -2679,6 +4568,39 @@ namespace ImmersiveFrameworkQA.Player
             return $"status='timeout' expectedSlot='{expectedText}' " +
                    $"observationAvailable='{observation.IsAvailable}' " +
                    $"observedSlots='{observedSlots}' slotFound='false'";
+        }
+
+        private static void LogActorLifecycleContextDiagnostic(
+            string caseId, PlayerQaPanel fixture,
+            PlayerSessionScopedObservationSnapshot observation,
+            PlayerSessionScopedSlotObservation slot, LocalPlayerHostAuthoring retainedQaHost)
+        {
+            if (caseId != "actor-lifecycle")
+            {
+                return;
+            }
+
+            string host = retainedQaHost != null
+                ? $"{retainedQaHost.name}#{retainedQaHost.GetEntityId()}"
+                : ReferenceEquals(retainedQaHost, null) ? "null" : "destroyed";
+            string actor = slot.HasCurrentActorEvidence
+                ? slot.CurrentActor.ActorEvidence.ToDiagnosticString()
+                : "unavailable";
+            UnityEngine.Debug.Log(
+                $"[QA_PLAYER_CONTEXT_DIAG] phase='timeout' operation='actor-lifecycle-precondition' " +
+                $"slot='{slot.Slot.PlayerSlotId.StableText}' activity='{observation.ActivityOwner.StableText}' " +
+                $"occurrence='{observation.ActivityOccurrence}' frame='{Time.frameCount}' " +
+                $"joined='{slot.IsJoined}' selectedActorMatchesExpected='{slot.Slot.SelectedActorProfile == fixture.DefaultActor}' " +
+                $"selectedActorActual='{EscapeDiagnosticValue(DescribeObject(slot.Slot.SelectedActorProfile))}' selectedActorExpected='{EscapeDiagnosticValue(DescribeObject(fixture.DefaultActor))}' " +
+                $"logicalActorPrepared='{slot.IsLogicalActorPrepared}' physicallyMaterialized='{slot.IsPhysicallyMaterialized}' " +
+                $"hasCurrentActor='{slot.CurrentActor.HasCurrentActor}' currentActor='{EscapeDiagnosticValue(actor)}' " +
+                $"hasHostEvidence='{slot.HasHostEvidence}' assignmentOriginActual='{slot.HostEvidence.AssignmentOrigin}' " +
+                $"assignmentOriginExpected='{PlayerSlotAssignmentOrigin.ManagerProvisioned}' " +
+                $"assignmentOriginMatchesExpected='{slot.HostEvidence.AssignmentOrigin == PlayerSlotAssignmentOrigin.ManagerProvisioned}' " +
+                $"assignmentToken='{slot.HostEvidence.AssignmentToken.StableText}' bindingIdentity='{slot.HostEvidence.HostBindingIdentity.StableText}' " +
+                $"qaRetainedHost='{EscapeDiagnosticValue(host)}' qaHostMatchesSlot='{retainedQaHost != null && retainedQaHost.HasJoinedSlot && retainedQaHost.JoinedPlayerSlotId == slot.Slot.PlayerSlotId}' " +
+                $"hostEvidenceSource='{EscapeDiagnosticValue(slot.HostEvidence.Source)}' hostEvidenceReason='{EscapeDiagnosticValue(slot.HostEvidence.Reason)}'",
+                fixture);
         }
 
         private static IEnumerator RequestActivity(
