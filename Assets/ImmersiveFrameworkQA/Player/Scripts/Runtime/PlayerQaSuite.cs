@@ -30,6 +30,7 @@ namespace ImmersiveFrameworkQA.Player
             internal PlayerGameplayInputReader CurrentGameplayReader;
             internal PlayerGameplayInputBindingToken LastReleasedGameplayBinding;
             internal bool PreviousReaderOccurrenceReleased;
+            internal Keyboard MembershipKeyboard;
 
             internal bool Ok => Failed == 0 && string.IsNullOrEmpty(FailedCase);
             internal bool IsCertified => Ok && Blocked.Count == 0;
@@ -58,6 +59,31 @@ namespace ImmersiveFrameworkQA.Player
         internal static IEnumerator Run(PlayerQaPanel fixture, Action<Result> completed)
         {
             var result = new Result();
+            try
+            {
+                yield return RunCases(fixture, completed, result);
+            }
+            finally
+            {
+                if (result.MembershipKeyboard != null)
+                {
+                    if (TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out _) &&
+                        TryFindSlot(fixture, ExpectedSlotTwoId(fixture), out PlayerSessionScopedSlotObservation p2) &&
+                        p2.IsJoined && p2.HasInputOwnershipEvidence &&
+                        OwnershipContainsDevice(p2.InputOwnership, result.MembershipKeyboard.deviceId))
+                    {
+                        access.RequestLeave(new SessionPlayerLeaveRequest(
+                            p2.Slot.PlayerSlotId, p2.Slot.Revision, Source, "player-qa-membership-device-cleanup"));
+                    }
+
+                    RemoveOwnedDevice(result.MembershipKeyboard);
+                    result.MembershipKeyboard = null;
+                }
+            }
+        }
+
+        private static IEnumerator RunCases(PlayerQaPanel fixture, Action<Result> completed, Result result)
+        {
             if (fixture == null)
             {
                 result.Fail("fixture", "configured panel", "null", "Player QA panel is missing.");
@@ -723,7 +749,18 @@ namespace ImmersiveFrameworkQA.Player
                     projectedReader.HasCurrentGameplayBinding &&
                     projectedReader.GameplayReady &&
                     projectedReader.CurrentBindingToken ==
-                        projectedP1.GameplayAdmission.InputBindingToken,
+                        projectedP1.GameplayAdmission.InputBindingToken &&
+                    TryResolveCurrentPresentation(
+                        previousHost,
+                        out PlayerActorRuntimeHost projectedRuntimeHost,
+                        out GameObject projectedPresentation) &&
+                    !ReferenceEquals(projectedRuntimeHost, previousRuntimeHost) &&
+                    !ReferenceEquals(projectedPresentation, previousPresentation) &&
+                    Vector3.Distance(projectedPresentation.transform.position, replacementPose) < 0.0001f &&
+                    Quaternion.Angle(projectedPresentation.transform.rotation, replacementRotation) < 0.001f &&
+                    Vector3.Distance(projectedRuntimeHost.transform.position, previousRuntimeHostPosition) < 0.0001f &&
+                    Quaternion.Angle(projectedRuntimeHost.transform.rotation, previousRuntimeHostRotation) < 0.001f &&
+                    (previousReader == null || !previousReader.HasCurrentGameplayBinding),
                 "Timed out waiting for the public observation and Presentation gameplay reader to converge on the ADR-024 replacement result.");
             if (!result.Ok)
             {
@@ -743,19 +780,10 @@ namespace ImmersiveFrameworkQA.Player
 
             PlayerSessionScopedSlotObservation after =
                 FindSlot(afterObservation, ExpectedSlotId(fixture));
-            PlayerActorRuntimeHost[] currentRuntimeHosts =
-                previousHost != null && previousHost.ActorMount != null
-                    ? previousHost.ActorMount.GetComponentsInChildren<PlayerActorRuntimeHost>(true)
-                    : Array.Empty<PlayerActorRuntimeHost>();
-            PlayerActorRuntimeHost currentRuntimeHost = currentRuntimeHosts.Length == 1
-                ? currentRuntimeHosts[0]
-                : null;
-            GameObject currentPresentation =
-                currentRuntimeHost != null &&
-                currentRuntimeHost.PresentationMount != null &&
-                currentRuntimeHost.PresentationMount.childCount == 1
-                    ? currentRuntimeHost.PresentationMount.GetChild(0).gameObject
-                    : null;
+            TryResolveCurrentPresentation(
+                previousHost,
+                out PlayerActorRuntimeHost currentRuntimeHost,
+                out GameObject currentPresentation);
             string currentReaderIssue = string.Empty;
             bool hasCurrentReader = TryResolveCurrentGameplayReader(
                 previousHost,
@@ -916,15 +944,34 @@ namespace ImmersiveFrameworkQA.Player
                 }
             }
 
-            PlayerActorRuntimeHost[] runtimeHosts = result.PlayerOneHost != null &&
-                result.PlayerOneHost.ActorMount != null
-                ? result.PlayerOneHost.ActorMount.GetComponentsInChildren<PlayerActorRuntimeHost>(true)
-                : Array.Empty<PlayerActorRuntimeHost>();
-            PlayerActorRuntimeHost runtimeHost = runtimeHosts.Length == 1 ? runtimeHosts[0] : null;
-            GameObject presentation = runtimeHost != null && runtimeHost.PresentationMount != null &&
-                runtimeHost.PresentationMount.childCount == 1
-                ? runtimeHost.PresentationMount.GetChild(0).gameObject
-                : null;
+            Require(result, "actor-lifecycle", relocationAnchor != null,
+                "P1 relocation anchor", "missing",
+                "Actor lifecycle requires the authored Relocate Activity anchor.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            yield return WaitFor(
+                result,
+                "actor-lifecycle",
+                () => TryResolveCurrentPresentation(
+                          result.PlayerOneHost,
+                          out PlayerActorRuntimeHost currentRuntimeHost,
+                          out GameObject currentPresentation) &&
+                      Vector3.Distance(currentPresentation.transform.position, relocationAnchor.position) < 0.0001f &&
+                      Quaternion.Angle(currentPresentation.transform.rotation, relocationAnchor.rotation) < 0.001f &&
+                      Vector3.Distance(currentRuntimeHost.transform.position, relocationAnchor.position) >= 0.0001f,
+                "Timed out waiting for the prepared Presentation to converge on the Activity relocation pose.");
+            if (!result.Ok)
+            {
+                yield break;
+            }
+
+            TryResolveCurrentPresentation(
+                result.PlayerOneHost,
+                out PlayerActorRuntimeHost runtimeHost,
+                out GameObject presentation);
             Require(result, "actor-lifecycle",
                 relocationAnchor != null && runtimeHost != null && presentation != null &&
                 Vector3.Distance(presentation.transform.position, relocationAnchor.position) < 0.0001f &&
@@ -996,8 +1043,12 @@ namespace ImmersiveFrameworkQA.Player
 
             yield return WaitFor(result, caseId, () =>
                 TryFindSlot(fixture, slotId, out PlayerSessionScopedSlotObservation released) &&
-                !released.IsJoined && !released.IsLogicalActorPrepared &&
-                !released.IsPhysicallyMaterialized && previousPresentation == null &&
+                released.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                !released.Slot.ReservationToken.IsValid &&
+                !released.IsJoined && !released.HasHostEvidence &&
+                !released.HasInputOwnershipEvidence &&
+                !released.IsLogicalActorPrepared && !released.IsPhysicallyMaterialized &&
+                !released.HasGameplayAdmissionEvidence && previousPresentation == null &&
                 previousRuntimeHost == null && previousHost == null,
                 "Leave did not release P1, its prepared Actor, Presentation and Runtime Host.");
             if (!result.Ok)
@@ -1069,10 +1120,28 @@ namespace ImmersiveFrameworkQA.Player
                 }
             }
 
-            yield return WaitForSlot(result, caseId, fixture,
-                slot => slot.IsJoined && slot.Slot.SelectedActorProfile == fixture.DefaultActor &&
-                        slot.IsLogicalActorPrepared && slot.IsPhysicallyMaterialized &&
-                        slot.CurrentActor.HasCurrentActor && slot.HasHostEvidence);
+            yield return WaitFor(result, caseId, () =>
+                access.TryGetObservation(out PlayerSessionScopedObservationSnapshot converged) &&
+                converged != null && converged.IsAvailable &&
+                converged.HasCurrentActivityOccurrence &&
+                converged.ActivityOwner == before.ActivityOwner &&
+                converged.ActivityOccurrence == before.ActivityOccurrence &&
+                TryFindSlot(converged, slotId, out PlayerSessionScopedSlotObservation slot) &&
+                slot.IsJoined && slot.Slot.SelectedActorProfile == fixture.DefaultActor &&
+                slot.Slot.Revision > previous.Slot.Revision &&
+                slot.IsLogicalActorPrepared && slot.IsPhysicallyMaterialized &&
+                slot.CurrentActor.HasCurrentActor && slot.HasHostEvidence &&
+                slot.HostEvidence.AssignmentToken != previous.HostEvidence.AssignmentToken &&
+                TryResolveCurrentPresentation(
+                    result.PlayerOneHost,
+                    out PlayerActorRuntimeHost currentRuntimeHost,
+                    out GameObject currentPresentation) &&
+                !ReferenceEquals(currentRuntimeHost, previousRuntimeHost) &&
+                !ReferenceEquals(currentPresentation, previousPresentation) &&
+                Vector3.Distance(currentPresentation.transform.position, anchorPosition) < 0.0001f &&
+                Quaternion.Angle(currentPresentation.transform.rotation, anchorRotation) < 0.001f &&
+                Vector3.Distance(currentRuntimeHost.transform.position, anchorPosition) >= 0.0001f,
+                "Timed out waiting for the fresh P1 observation and relocated Presentation to converge.");
             if (!result.Ok)
             {
                 yield break;
@@ -1092,14 +1161,10 @@ namespace ImmersiveFrameworkQA.Player
             }
 
             PlayerSessionScopedSlotObservation current = FindSlot(after, slotId);
-            PlayerActorRuntimeHost[] runtimeHosts = result.PlayerOneHost.ActorMount != null
-                ? result.PlayerOneHost.ActorMount.GetComponentsInChildren<PlayerActorRuntimeHost>(true)
-                : Array.Empty<PlayerActorRuntimeHost>();
-            PlayerActorRuntimeHost runtimeHost = runtimeHosts.Length == 1 ? runtimeHosts[0] : null;
-            GameObject presentation = runtimeHost != null && runtimeHost.PresentationMount != null &&
-                runtimeHost.PresentationMount.childCount == 1
-                ? runtimeHost.PresentationMount.GetChild(0).gameObject
-                : null;
+            TryResolveCurrentPresentation(
+                result.PlayerOneHost,
+                out PlayerActorRuntimeHost runtimeHost,
+                out GameObject presentation);
             Require(result, caseId,
                 current.IsJoined && current.IsLogicalActorPrepared && current.IsPhysicallyMaterialized &&
                 current.Slot.Revision > previous.Slot.Revision && current.HasHostEvidence &&
@@ -1526,9 +1591,14 @@ namespace ImmersiveFrameworkQA.Player
 
             yield return WaitFor(result, "reader-cardinality", () =>
                 TryFindSlot(fixture, ExpectedSlotId(fixture), out PlayerSessionScopedSlotObservation released) &&
+                released.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                !released.Slot.ReservationToken.IsValid &&
                 !released.IsJoined &&
+                !released.HasHostEvidence &&
+                !released.HasInputOwnershipEvidence &&
                 !released.IsLogicalActorPrepared &&
                 !released.IsPhysicallyMaterialized &&
+                !released.HasGameplayAdmissionEvidence &&
                 (previousReader == null || !previousReader.HasCurrentGameplayBinding) &&
                 (!verifyAllReaderLeaks ||
                  (capturedPreviousReaders && HaveReleasedGameplayReaders(previousReaders))) &&
@@ -1937,12 +2007,13 @@ namespace ImmersiveFrameworkQA.Player
                 yield break;
             }
 
-            Keyboard sharedKeyboard = Keyboard.current;
+            result.MembershipKeyboard = InputSystem.AddDevice<Keyboard>();
+            Keyboard membershipKeyboard = result.MembershipKeyboard;
             Require(result, "second-player",
-                sharedKeyboard != null,
-                "explicit QA Keyboard device",
+                membershipKeyboard != null && membershipKeyboard.added,
+                "distinct explicit QA Keyboard device",
                 "missing",
-                "Second-player provisioning proof requires the Editor Keyboard so the QA can explicitly share one deterministic device instead of depending on unpaired-device auto-selection.");
+                "Second-player provisioning requires its own device; P1's current device must not be shared.");
             if (!result.Ok)
             {
                 yield break;
@@ -1952,7 +2023,7 @@ namespace ImmersiveFrameworkQA.Player
                 new LocalPlayerJoinRequest(
                     Source,
                     "player-qa-join-p2",
-                    sharedKeyboard));
+                    membershipKeyboard));
             Require(result, "second-player", join != null && join.Succeeded &&
                 join.HasLocalPlayerHostEvidence && join.LocalPlayerHost != null &&
                 join.PlayerInput != null,
@@ -2028,7 +2099,11 @@ namespace ImmersiveFrameworkQA.Player
                           fixture,
                           ExpectedSlotTwoId(fixture),
                           out PlayerSessionScopedSlotObservation availableP2) &&
-                      !availableP2.IsJoined,
+                      availableP2.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                      !availableP2.Slot.ReservationToken.IsValid &&
+                      !availableP2.IsJoined &&
+                      !availableP2.HasHostEvidence &&
+                      !availableP2.HasInputOwnershipEvidence,
                 "Timed out releasing P2 before JoiningClosed proof.");
 
             PlayerParticipationOperationResult closed = access.CloseJoining(Source, "player-qa-close-joining");
@@ -2077,9 +2152,9 @@ namespace ImmersiveFrameworkQA.Player
                 yield break;
             }
 
-            Keyboard sharedKeyboard = Keyboard.current;
+            Keyboard membershipKeyboard = result.MembershipKeyboard;
             Require(result, "joining-control",
-                sharedKeyboard != null,
+                membershipKeyboard != null && membershipKeyboard.added,
                 "explicit QA Keyboard device for P2 restoration",
                 "missing",
                 "Joining control must restore the P2 occurrence consumed to prove JoiningClosed.");
@@ -2092,7 +2167,7 @@ namespace ImmersiveFrameworkQA.Player
                 new LocalPlayerJoinRequest(
                     Source,
                     "player-qa-restore-p2-after-joining-control",
-                    sharedKeyboard));
+                    membershipKeyboard));
             Require(result, "joining-control",
                 restored != null && restored.Succeeded &&
                 restored.Slot.PlayerSlotId == ExpectedSlotTwoId(fixture),
@@ -2236,9 +2311,12 @@ namespace ImmersiveFrameworkQA.Player
                 result,
                 "leave",
                 () => TryFindSlot(fixture, ExpectedSlotTwoId(fixture), out PlayerSessionScopedSlotObservation after) &&
+                      after.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                      !after.Slot.ReservationToken.IsValid &&
                       !after.IsJoined &&
                       !after.Slot.HasSelectedActor &&
                       !after.HasHostEvidence &&
+                      !after.HasInputOwnershipEvidence &&
                       !after.IsLogicalActorPrepared &&
                       !after.IsPhysicallyMaterialized &&
                       !after.HasGameplayAdmissionEvidence,
@@ -2270,12 +2348,12 @@ namespace ImmersiveFrameworkQA.Player
                 yield break;
             }
 
-            Keyboard sharedKeyboard = Keyboard.current;
+            Keyboard membershipKeyboard = result.MembershipKeyboard;
             Require(result, "rejoin",
-                sharedKeyboard != null,
+                membershipKeyboard != null && membershipKeyboard.added,
                 "explicit QA Keyboard device",
                 "missing",
-                "Rejoin provisioning proof requires the Editor Keyboard so the QA does not depend on an unpaired device becoming available after P2 leaves.");
+                "Rejoin must reuse P2's distinct device only after its previous occurrence Leaves.");
             if (!result.Ok)
             {
                 yield break;
@@ -2286,7 +2364,7 @@ namespace ImmersiveFrameworkQA.Player
                 new LocalPlayerJoinRequest(
                     Source,
                     "player-qa-rejoin-p2",
-                    sharedKeyboard));
+                    membershipKeyboard));
             Require(result, "rejoin", join != null && join.Succeeded,
                 "P2 rejoined",
                 join == null ? "null" : $"{join.Status} {join.Message}",
@@ -2297,9 +2375,11 @@ namespace ImmersiveFrameworkQA.Player
                 fixture,
                 slot => slot.IsJoined &&
                         slot.HasHostEvidence &&
+                        slot.Slot.Revision > releasedRevision &&
                         !slot.Slot.HasSelectedActor &&
                         !slot.IsLogicalActorPrepared &&
-                        !slot.IsPhysicallyMaterialized,
+                        !slot.IsPhysicallyMaterialized &&
+                        !slot.HasGameplayAdmissionEvidence,
                 ExpectedSlotTwoId(fixture));
             if (!result.Ok || !TryFindSlot(
                     fixture,
@@ -2343,10 +2423,21 @@ namespace ImmersiveFrameworkQA.Player
                 result,
                 "rejoin",
                 fixture,
-                slot => !slot.IsJoined &&
+                slot => slot.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                        !slot.Slot.ReservationToken.IsValid &&
+                        !slot.IsJoined &&
+                        !slot.HasHostEvidence &&
+                        !slot.HasInputOwnershipEvidence &&
                         !slot.IsLogicalActorPrepared &&
-                        !slot.IsPhysicallyMaterialized,
+                        !slot.IsPhysicallyMaterialized &&
+                        !slot.HasCurrentActorEvidence &&
+                        !slot.HasGameplayAdmissionEvidence,
                 ExpectedSlotTwoId(fixture));
+            if (result.Ok)
+            {
+                RemoveOwnedDevice(result.MembershipKeyboard);
+                result.MembershipKeyboard = null;
+            }
         }
 
         private static IEnumerator ProveNegatives(PlayerQaPanel fixture, Result result)
@@ -2456,8 +2547,11 @@ namespace ImmersiveFrameworkQA.Player
                     p1.HostEvidence.AssignmentOrigin ==
                         PlayerSlotAssignmentOrigin.ManagerProvisioned &&
                     p1.Slot.Revision > 0 &&
+                    p2.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                    !p2.Slot.ReservationToken.IsValid &&
                     !p2.IsJoined &&
                     !p2.HasHostEvidence &&
+                    !p2.HasInputOwnershipEvidence &&
                     relocateIdle &&
                     gameplayReadyIdle &&
                     currentKeyboard != null,
@@ -2493,10 +2587,17 @@ namespace ImmersiveFrameworkQA.Player
                 proof,
                 () => TryFindSlot(fixture, ExpectedSlotId(fixture), out PlayerSessionScopedSlotObservation releasedP1) &&
                       TryFindSlot(fixture, ExpectedSlotTwoId(fixture), out PlayerSessionScopedSlotObservation releasedP2) &&
+                      releasedP1.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                      !releasedP1.Slot.ReservationToken.IsValid &&
                       !releasedP1.IsJoined &&
                       !releasedP1.HasHostEvidence &&
                       !releasedP1.HasInputOwnershipEvidence &&
+                      !releasedP1.HasGameplayAdmissionEvidence &&
+                      releasedP2.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                      !releasedP2.Slot.ReservationToken.IsValid &&
                       !releasedP2.IsJoined &&
+                      !releasedP2.HasHostEvidence &&
+                      !releasedP2.HasInputOwnershipEvidence &&
                       (leftoverHost == null) &&
                       (leftoverReader == null || !leftoverReader.HasCurrentGameplayBinding),
                 "Timed out waiting for leftover P1 terminal release before the ADR-025 fixture.");
@@ -2691,6 +2792,18 @@ namespace ImmersiveFrameworkQA.Player
             InputOwnershipResources resources,
             InputOwnershipProof proof)
         {
+            if (!TryGetAccess(
+                    fixture,
+                    out IPlayerSessionScopedAccess access,
+                    out string accessIssue))
+            {
+                proof.Record(
+                    "available scoped observation for input ownership Joins",
+                    accessIssue,
+                    "ADR-025 Join convergence requires the authoritative Route-scoped observation.");
+                yield break;
+            }
+
             fixture.JoinCommand.InvokeFromDevice(resources.DeviceA);
             LocalPlayerJoinResult joinA = fixture.JoinCommand.LastJoinResult;
             if (!proof.Check(
@@ -2712,10 +2825,33 @@ namespace ImmersiveFrameworkQA.Player
             resources.PlayerInputA = joinA.PlayerInput;
             yield return WaitUntil(
                 proof,
-                () => TryFindSlot(fixture, resources.SlotA, out PlayerSessionScopedSlotObservation slotA) &&
+                () => access.TryGetObservation(out PlayerSessionScopedObservationSnapshot current) &&
+                      current != null && current.IsAvailable &&
+                      TryFindSlot(current, resources.SlotA, out PlayerSessionScopedSlotObservation slotA) &&
                       slotA.IsJoined &&
-                      slotA.HasHostEvidence,
-                "Timed out waiting for Slot A observation after InvokeFromDevice(deviceA).");
+                      slotA.HasHostEvidence &&
+                      slotA.HasInputOwnershipEvidence &&
+                      OwnershipContainsDevice(slotA.InputOwnership, resources.DeviceA.deviceId) &&
+                      TryFindSingleAvailableSlot(
+                          current,
+                          resources.SlotA,
+                          out PlayerSessionScopedSlotObservation availableB) &&
+                      availableB.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                      !availableB.Slot.ReservationToken.IsValid &&
+                      !availableB.HasHostEvidence &&
+                      !availableB.HostEvidence.AssignmentToken.IsValid &&
+                      !availableB.HasInputOwnershipEvidence &&
+                      availableB.HasPreparationEvidence && availableB.Preparation.IsUnprepared && !availableB.IsLogicalActorPrepared &&
+                      !availableB.HasCurrentActorEvidence &&
+                      !availableB.HasGameplayAdmissionEvidence &&
+                      !availableB.IsPhysicallyMaterialized,
+                "Timed out waiting for Slot A Host/device ownership and the current Available Slot B before the duplicate-device proof.");
+            if (proof.HasFailure)
+            {
+                yield break;
+            }
+
+            ProveDuplicateInputDeviceRejected(fixture, resources, proof);
             if (proof.HasFailure)
             {
                 yield break;
@@ -2747,20 +2883,33 @@ namespace ImmersiveFrameworkQA.Player
             resources.PlayerInputB = joinB.PlayerInput;
             yield return WaitUntil(
                 proof,
-                () => TryFindSlot(fixture, resources.SlotB, out PlayerSessionScopedSlotObservation slotB) &&
+                () => access.TryGetObservation(out PlayerSessionScopedObservationSnapshot current) &&
+                      current != null && current.IsAvailable &&
+                      TryFindSlot(current, resources.SlotA, out PlayerSessionScopedSlotObservation slotA) &&
+                      TryFindSlot(current, resources.SlotB, out PlayerSessionScopedSlotObservation slotB) &&
+                      slotA.IsJoined &&
+                      slotA.HasHostEvidence &&
+                      slotA.HasInputOwnershipEvidence &&
+                      OwnershipContainsDevice(slotA.InputOwnership, resources.DeviceA.deviceId) &&
+                      !OwnershipContainsDevice(slotA.InputOwnership, resources.DeviceB.deviceId) &&
                       slotB.IsJoined &&
-                      slotB.HasHostEvidence,
-                "Timed out waiting for Slot B observation after InvokeFromDevice(deviceB).");
+                      slotB.HasHostEvidence &&
+                      slotB.HasInputOwnershipEvidence &&
+                      OwnershipContainsDevice(slotB.InputOwnership, resources.DeviceB.deviceId) &&
+                      !OwnershipContainsDevice(slotB.InputOwnership, resources.DeviceA.deviceId),
+                "Timed out waiting for both joined Slots to expose isolated Host/device ownership.");
             if (proof.HasFailure)
             {
                 yield break;
             }
 
-            if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string issue) ||
-                !access.TryGetObservation(out PlayerSessionScopedObservationSnapshot observation) ||
+            if (!access.TryGetObservation(out PlayerSessionScopedObservationSnapshot observation) ||
                 observation == null)
             {
-                proof.Record("available scoped observation after both Joins", issue, issue);
+                proof.Record(
+                    "available scoped observation after both Joins",
+                    access.Snapshot.Diagnostic,
+                    "Could not recollect the converged ADR-025 ownership observation.");
                 yield break;
             }
 
@@ -2831,6 +2980,143 @@ namespace ImmersiveFrameworkQA.Player
                 "Ownership ControlScheme must match the effective PlayerInput scheme, including an empty scheme.");
         }
 
+        private static void ProveDuplicateInputDeviceRejected(
+            PlayerQaPanel fixture,
+            InputOwnershipResources resources,
+            InputOwnershipProof proof)
+        {
+            if (!TryGetAccess(fixture, out IPlayerSessionScopedAccess access, out string issue) ||
+                !access.TryGetObservation(out PlayerSessionScopedObservationSnapshot before) ||
+                before == null || !before.IsAvailable)
+            {
+                proof.Record("current ownership before duplicate Join", issue,
+                    "Duplicate-device proof requires an authoritative baseline.");
+                return;
+            }
+
+            PlayerSessionScopedSlotObservation beforeA = FindSlot(before, resources.SlotA);
+            if (!TryFindSingleAvailableSlot(
+                    before,
+                    resources.SlotA,
+                    out PlayerSessionScopedSlotObservation beforeB))
+            {
+                proof.Record(
+                    "exactly one current Available Slot before duplicate Join",
+                    before.Diagnostic,
+                    "Duplicate-device proof must resolve Slot B from the current public Session snapshot.");
+                return;
+            }
+
+            resources.SlotB = beforeB.Slot.PlayerSlotId;
+            resources.RevisionB = beforeB.Slot.Revision;
+            if (!proof.Check(
+                    resources.SlotA == ExpectedSlotId(fixture) &&
+                    resources.SlotB.IsValid &&
+                    beforeA.IsJoined && beforeA.HasHostEvidence && beforeA.HasInputOwnershipEvidence &&
+                    OwnershipContainsDevice(beforeA.InputOwnership, resources.DeviceA.deviceId) &&
+                    !beforeB.IsJoined &&
+                    beforeB.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                    !beforeB.Slot.ReservationToken.IsValid &&
+                    !beforeB.HasHostEvidence && !beforeB.HostEvidence.AssignmentToken.IsValid &&
+                    !beforeB.HasInputOwnershipEvidence && beforeB.HasPreparationEvidence && beforeB.Preparation.IsUnprepared && !beforeB.IsLogicalActorPrepared &&
+                    !beforeB.HasCurrentActorEvidence &&
+                    !beforeB.HasGameplayAdmissionEvidence && !beforeB.IsPhysicallyMaterialized &&
+                    resources.HostA != null && resources.PlayerInputA != null &&
+                    resources.HostA.transform.parent != null,
+                    "Device A owned by P1; P2 Available without ownership",
+                    before.Diagnostic,
+                    "Duplicate-device rejection must be tested before Device B joins."))
+            {
+                return;
+            }
+
+            Transform hostParent = resources.HostA.transform.parent;
+            int hostCount = hostParent.GetComponentsInChildren<LocalPlayerHostAuthoring>(true).Length;
+            int playerInputCount = PlayerInput.all.Count;
+            fixture.JoinCommand.InvokeFromDevice(resources.DeviceA);
+            LocalPlayerJoinResult duplicate = fixture.JoinCommand.LastJoinResult;
+            if (!proof.Check(
+                    duplicate != null && duplicate.Status == LocalPlayerJoinStatus.RejectedDeviceAlreadyOwned &&
+                    !duplicate.OperationId.IsValid &&
+                    !duplicate.HasReservationEvidence && !duplicate.HasCommitEvidence &&
+                    !duplicate.HasRollbackEvidence && !duplicate.HasLocalPlayerHostEvidence &&
+                    duplicate.PlayerInput == null &&
+                    duplicate.CallbackConfirmation == LocalPlayerJoinCallbackConfirmation.None,
+                    "RejectedDeviceAlreadyOwned before reservation/provisioning/callback",
+                    duplicate == null ? "null" : duplicate.ToDiagnosticString(),
+                    "The same live Device A must not admit another Player."))
+            {
+                return;
+            }
+
+            if (!access.TryGetObservation(out PlayerSessionScopedObservationSnapshot after) ||
+                after == null || !after.IsAvailable)
+            {
+                proof.Record("observation after duplicate rejection", "unavailable",
+                    "Duplicate Join must preserve Session observation.");
+                return;
+            }
+
+            PlayerSessionScopedSlotObservation afterA = FindSlot(after, resources.SlotA);
+            PlayerSessionScopedSlotObservation afterB = FindSlot(after, resources.SlotB);
+            bool aPreserved = afterA.Slot.Equals(beforeA.Slot) && afterA.IsJoined &&
+                afterA.HasHostEvidence && afterA.HasInputOwnershipEvidence &&
+                afterA.HostEvidence.HostBindingIdentity.Equals(beforeA.HostEvidence.HostBindingIdentity) &&
+                afterA.HostEvidence.AssignmentToken.Equals(beforeA.HostEvidence.AssignmentToken) &&
+                resources.HostA != null && resources.HostA.IsJoined &&
+                ReferenceEquals(resources.HostA.PlayerInput, resources.PlayerInputA) &&
+                SameInputOwnership(beforeA.InputOwnership, afterA.InputOwnership) &&
+                OwnershipContainsDevice(afterA.InputOwnership, resources.DeviceA.deviceId);
+            bool bPreserved = beforeB.Slot.PlayerSlotId == resources.SlotB &&
+                afterB.Slot.PlayerSlotId == resources.SlotB &&
+                beforeB.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                afterB.Slot.AllocationState == PlayerSlotAllocationState.Available &&
+                afterB.Slot.Revision == beforeB.Slot.Revision &&
+                !beforeB.Slot.ReservationToken.IsValid && !afterB.Slot.ReservationToken.IsValid &&
+                !beforeB.HasHostEvidence && !afterB.HasHostEvidence &&
+                !beforeB.HostEvidence.AssignmentToken.IsValid &&
+                !afterB.HostEvidence.AssignmentToken.IsValid &&
+                !beforeB.HasInputOwnershipEvidence && !afterB.HasInputOwnershipEvidence &&
+                beforeB.HasPreparationEvidence && beforeB.Preparation.IsUnprepared && !beforeB.IsLogicalActorPrepared && afterB.HasPreparationEvidence && afterB.Preparation.IsUnprepared && !afterB.IsLogicalActorPrepared &&
+                !beforeB.HasCurrentActorEvidence && !afterB.HasCurrentActorEvidence &&
+                !beforeB.HasGameplayAdmissionEvidence && !afterB.HasGameplayAdmissionEvidence &&
+                !beforeB.IsPhysicallyMaterialized && !afterB.IsPhysicallyMaterialized;
+            bool topologyPreserved = after.SessionRevision == before.SessionRevision &&
+                after.Slots.Count == before.Slots.Count &&
+                after.ActivityOwner == before.ActivityOwner && after.ActivityOccurrence == before.ActivityOccurrence &&
+                after.Participation.JoiningOpen == before.Participation.JoiningOpen &&
+                PlayerInput.all.Count == playerInputCount &&
+                hostParent.GetComponentsInChildren<LocalPlayerHostAuthoring>(true).Length == hostCount;
+            proof.Check(aPreserved && bPreserved && topologyPreserved,
+                "A unchanged; B Available; no extra PlayerInput/Host or Slot revision",
+                $"slotA='{resources.SlotA.StableText}' slotB='{resources.SlotB.StableText}' " +
+                $"revisionA={beforeA.Slot.Revision} revisionB={beforeB.Slot.Revision} " +
+                $"aPreserved={aPreserved} bPreserved={bPreserved} topologyPreserved={topologyPreserved} " +
+                $"sessionBefore={before.SessionRevision} sessionAfter={after.SessionRevision}",
+                "Duplicate-device rejection must not mutate current ownership or reserve the next Slot.");
+        }
+
+        private static bool SameInputOwnership(
+            LocalPlayerInputOwnershipSummary before,
+            LocalPlayerInputOwnershipSummary after)
+        {
+            if (before.UnityPlayerIndex != after.UnityPlayerIndex ||
+                before.ControlScheme != after.ControlScheme || before.Devices.Count != after.Devices.Count)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < before.Devices.Count; index++)
+            {
+                if (!before.Devices[index].Equals(after.Devices[index]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private static IEnumerator ProveInputOwnershipGameplayIsolation(
             PlayerQaPanel fixture,
             InputOwnershipResources resources,
@@ -2884,8 +3170,10 @@ namespace ImmersiveFrameworkQA.Player
 
             yield return WaitUntil(
                 proof,
-                () => IsInputOwnershipSlotGameplayReady(fixture, resources.SlotA) &&
-                      IsInputOwnershipSlotGameplayReady(fixture, resources.SlotB),
+                () => IsInputOwnershipSlotGameplayReaderReady(
+                          fixture, resources.SlotA, resources.HostA) &&
+                      IsInputOwnershipSlotGameplayReaderReady(
+                          fixture, resources.SlotB, resources.HostB),
                 "Timed out waiting for both ADR-025 Slots to become GameplayReady with their configured default Actors. " +
                 $"activityReadiness='{DescribeDiagnostic(resources.ActivityReadiness)}' " +
                 $"blockingIssueCount='{DescribeDiagnostic(resources.BlockingIssueCount)}' " +
@@ -3030,6 +3318,7 @@ namespace ImmersiveFrameworkQA.Player
             resources.HostBindingB = preB.HostEvidence.HostBindingIdentity;
             resources.AssignmentB = preB.HostEvidence.AssignmentToken;
             LocalPlayerHostAuthoring previousHostA = resources.HostA;
+            PlayerInput previousPlayerInputA = resources.PlayerInputA;
             PlayerGameplayInputReader previousReaderA = resources.ReaderA;
             PlayerGameplayInputBindingToken previousBindingA = previousReaderA != null
                 ? previousReaderA.CurrentBindingToken
@@ -3227,7 +3516,13 @@ namespace ImmersiveFrameworkQA.Player
                 () => TryFindSlot(fixture, resources.SlotA, out PlayerSessionScopedSlotObservation rejoined) &&
                       rejoined.IsJoined &&
                       rejoined.HasHostEvidence &&
-                      rejoined.HasInputOwnershipEvidence,
+                      rejoined.Slot.Revision > previousRevisionA &&
+                      rejoined.HasInputOwnershipEvidence &&
+                      OwnershipContainsDevice(rejoined.InputOwnership, resources.DeviceA.deviceId) &&
+                      !OwnershipContainsDevice(rejoined.InputOwnership, resources.DeviceB.deviceId) &&
+                      (!previousHostBindingA.IsValid ||
+                       !rejoined.HostEvidence.HostBindingIdentity.Equals(previousHostBindingA) ||
+                       !rejoined.HostEvidence.AssignmentToken.Equals(previousAssignmentA)),
                 "Timed out waiting for rejoined A current observation.");
             if (proof.HasFailure)
             {
@@ -3247,6 +3542,9 @@ namespace ImmersiveFrameworkQA.Player
                 currentA.Slot.Revision > previousRevisionA &&
                 resources.HostA != null &&
                 !ReferenceEquals(resources.HostA, previousHostA) &&
+                resources.PlayerInputA != null &&
+                !ReferenceEquals(resources.PlayerInputA, previousPlayerInputA) &&
+                ReferenceEquals(rejoinA.Request.PairWithDevice, resources.DeviceA) &&
                 currentA.HasInputOwnershipEvidence &&
                 OwnershipContainsDevice(currentA.InputOwnership, resources.DeviceA.deviceId) &&
                 !OwnershipContainsDevice(currentA.InputOwnership, resources.DeviceB.deviceId) &&
@@ -3268,7 +3566,7 @@ namespace ImmersiveFrameworkQA.Player
                     $"previousRevision={previousRevisionA} currentRevision={currentA.Slot.Revision} " +
                     $"sameHost={ReferenceEquals(resources.HostA, previousHostA)} " +
                     $"hostBindingEqual={currentA.HostEvidence.HostBindingIdentity.Equals(previousHostBindingA)}",
-                    "Rejoin A must publish a fresh current occurrence without sourcing ownership from the old snapshot."))
+                    "After terminal Leave, Device A must be eligible again with fresh PlayerInput/Host ownership."))
             {
                 yield break;
             }
@@ -3687,9 +3985,10 @@ namespace ImmersiveFrameworkQA.Player
                 : string.Empty;
         }
 
-        private static bool IsInputOwnershipSlotGameplayReady(
+        private static bool IsInputOwnershipSlotGameplayReaderReady(
             PlayerQaPanel fixture,
-            PlayerSlotId slotId)
+            PlayerSlotId slotId,
+            LocalPlayerHostAuthoring host)
         {
             ActorProfile expected = ResolveConfiguredDefaultActor(fixture, slotId);
             return expected != null &&
@@ -3701,7 +4000,15 @@ namespace ImmersiveFrameworkQA.Player
                 slot.IsPhysicallyMaterialized &&
                 slot.HasGameplayAdmissionEvidence &&
                 slot.GameplayAdmission.IsAdmitted &&
-                slot.GameplayAdmission.GameplayReady;
+                slot.GameplayAdmission.GameplayReady &&
+                slot.GameplayAdmission.InputBindingToken.IsValid &&
+                TryResolveCurrentGameplayReader(
+                    host,
+                    out PlayerGameplayInputReader reader,
+                    out _) &&
+                reader.HasCurrentGameplayBinding &&
+                reader.GameplayReady &&
+                reader.CurrentBindingToken == slot.GameplayAdmission.InputBindingToken;
         }
 
         private static ActorProfile ResolveConfiguredDefaultActor(
@@ -4350,6 +4657,32 @@ namespace ImmersiveFrameworkQA.Player
             return reader != null;
         }
 
+        private static bool TryResolveCurrentPresentation(
+            LocalPlayerHostAuthoring localPlayerHost,
+            out PlayerActorRuntimeHost runtimeHost,
+            out GameObject presentation)
+        {
+            runtimeHost = null;
+            presentation = null;
+            if (localPlayerHost == null || localPlayerHost.ActorMount == null)
+            {
+                return false;
+            }
+
+            PlayerActorRuntimeHost[] runtimeHosts =
+                localPlayerHost.ActorMount.GetComponentsInChildren<PlayerActorRuntimeHost>(true);
+            if (runtimeHosts.Length != 1 || runtimeHosts[0] == null ||
+                runtimeHosts[0].PresentationMount == null ||
+                runtimeHosts[0].PresentationMount.childCount != 1)
+            {
+                return false;
+            }
+
+            runtimeHost = runtimeHosts[0];
+            presentation = runtimeHost.PresentationMount.GetChild(0).gameObject;
+            return presentation != null;
+        }
+
         private static bool TryGetCurrentGameplayReaderCount(
             LocalPlayerHostAuthoring localPlayerHost,
             out int readerCount,
@@ -4465,6 +4798,30 @@ namespace ImmersiveFrameworkQA.Player
             return false;
         }
 
+        private static bool TryFindSlot(
+            PlayerSessionScopedObservationSnapshot observation,
+            PlayerSlotId slotId,
+            out PlayerSessionScopedSlotObservation slot)
+        {
+            slot = default;
+            if (observation == null || !observation.IsAvailable || !slotId.IsValid)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < observation.Slots.Count; index++)
+            {
+                PlayerSessionScopedSlotObservation candidate = observation.Slots[index];
+                if (candidate.Slot.PlayerSlotId == slotId)
+                {
+                    slot = candidate;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static PlayerSessionScopedSlotObservation FindSlot(
             PlayerSessionScopedObservationSnapshot observation,
             PlayerSlotId slotId)
@@ -4479,6 +4836,40 @@ namespace ImmersiveFrameworkQA.Player
             }
 
             return default;
+        }
+
+        private static bool TryFindSingleAvailableSlot(
+            PlayerSessionScopedObservationSnapshot observation,
+            PlayerSlotId excludedSlotId,
+            out PlayerSessionScopedSlotObservation slot)
+        {
+            slot = default;
+            bool found = false;
+            if (observation == null || !observation.IsAvailable)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < observation.Slots.Count; index++)
+            {
+                PlayerSessionScopedSlotObservation candidate = observation.Slots[index];
+                if (candidate.Slot.PlayerSlotId == excludedSlotId ||
+                    candidate.Slot.AllocationState != PlayerSlotAllocationState.Available)
+                {
+                    continue;
+                }
+
+                if (found)
+                {
+                    slot = default;
+                    return false;
+                }
+
+                slot = candidate;
+                found = true;
+            }
+
+            return found && slot.Slot.PlayerSlotId.IsValid;
         }
 
         private static IEnumerator WaitForSlot(
