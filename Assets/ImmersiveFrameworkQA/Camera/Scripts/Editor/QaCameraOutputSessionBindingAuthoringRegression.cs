@@ -3,6 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using Immersive.Framework.Camera;
+using Immersive.Framework.CameraAuthoring;
+using Unity.Cinemachine;
 using UnityEditor;
 using UnityEngine;
 
@@ -18,9 +20,9 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             "Immersive Framework/QA/Regressions/Camera/Run Camera Output Session Binding Authoring Regression";
 
         private const string ValidatorTypeName =
-            "Immersive.Framework.Editor.CameraAuthoring.CameraOutputAuthoringAuthoringValidator";
+            "Immersive.Framework.Editor.CameraAuthoring.CameraOutputSessionAuthoringValidator";
         private const string EditorTypeName =
-            "Immersive.Framework.Editor.CameraAuthoring.CameraOutputAuthoringEditor";
+            "Immersive.Framework.Editor.Camera.Bindings.CameraOutputAuthoringEditor";
         private const string BrainTypeName =
             "Unity.Cinemachine.CinemachineBrain";
 
@@ -182,6 +184,13 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 CameraOutputAuthoring binding =
                     outputRoot.AddComponent<CameraOutputAuthoring>();
                 SetOutputId(binding, $"qa.camera.output.{caseName}");
+                var rigRoot = new GameObject($"QA_{caseName}_DefaultRig");
+                rigRoot.transform.SetParent(outputRoot.transform, false);
+                CameraRigComposer defaultRig =
+                    rigRoot.AddComponent<CameraRigComposer>();
+                CinemachineCamera cinemachine =
+                    rigRoot.AddComponent<CinemachineCamera>();
+                defaultRig.EditorSetGeneratedReference(cinemachine);
 
                 UnityEngine.Camera camera = includeCamera
                     ? outputRoot.AddComponent<UnityEngine.Camera>()
@@ -201,7 +210,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                     brain = brainRoot.AddComponent(ResolveType(BrainTypeName));
                 }
 
-                AssignOutputReferences(binding, camera, brain);
+                AssignOutputReferences(binding, camera, brain, defaultRig);
                 ValidationProbe validation = Validate(binding);
 
                 Require(
@@ -283,19 +292,24 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private static void AssignOutputReferences(
             CameraOutputAuthoring binding,
             UnityEngine.Camera camera,
-            Component brain)
+            Component brain,
+            CameraRigComposer defaultRig)
         {
             var serialized = new SerializedObject(binding);
             SerializedProperty cameraProperty =
                 serialized.FindProperty("unityCamera");
             SerializedProperty brainProperty =
                 serialized.FindProperty("cinemachineBrain");
+            SerializedProperty defaultRigProperty =
+                serialized.FindProperty("defaultCameraRig");
 
-            Require(cameraProperty != null && brainProperty != null,
+            Require(cameraProperty != null && brainProperty != null &&
+                    defaultRigProperty != null,
                 "Camera Output component references are unavailable.");
 
             cameraProperty.objectReferenceValue = camera;
             brainProperty.objectReferenceValue = brain;
+            defaultRigProperty.objectReferenceValue = defaultRig;
             serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 

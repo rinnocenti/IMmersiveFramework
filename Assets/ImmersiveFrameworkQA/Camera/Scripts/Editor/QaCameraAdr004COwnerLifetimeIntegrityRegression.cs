@@ -88,8 +88,8 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             Require(QaCameraOverrideAuthorityFixture.Adr004CSessionDisableExecuted,
                 "Canonical C9R Session disable evidence has not executed.");
             Require(QaCameraOverrideAuthorityFixture.Adr004CSessionDisablePassed,
-                "Session disable did not release its request or restore a valid next winner without silent re-publication.");
-            return "operation='DisableSessionBinding' owner='Session' request='Released' reenable='ExplicitOnly'.";
+                "Session disable did not release its request or restore the Output Default without silent re-publication.");
+            return "operation='DisableSessionBinding' owner='Session' request='Released' restored='OutputDefault' reenable='ExplicitOnly'.";
         }
 
         private static string Case04RouteDisableCleanup()
@@ -133,8 +133,8 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             Require(QaCameraOverrideAuthorityFixture.Adr004CWinningRestoreExecuted,
                 "Canonical C9R winning-owner loss evidence has not executed.");
             Require(QaCameraOverrideAuthorityFixture.Adr004CWinningRestorePassed,
-                "Removing the winning Activity owner did not restore the next valid Player request.");
-            return "operation='DisableWinningActivity' resultingWinner='Player'.";
+                "Removing the winning Activity owner did not restore the explicit Output Default.");
+            return "operation='DisableWinningActivity' resultingPresentation='OutputDefault'.";
         }
 
         private static string Case09CleanupIdempotent()

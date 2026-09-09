@@ -161,20 +161,12 @@ orphan='False'
 - explicit rollback failure;
 - normal Activity/Route cleanup;
 - abnormal Route owner loss without orphaning;
-- duplicate persistent output validation;
+- duplicate persistent OutputId validation;
 - invalid output reference validation;
 - no fallback Camera authority introduced by QA.
 
-## Post-certification teardown hygiene
-
-After all functional gates were green, scene teardown exposed one QA-only
-synthetic Local Player cleanup issue: its local publisher could attempt a second
-release after the request had already disappeared from the output context.
-
-The v10 QA cleanup patch reconciles that local synthetic state before redundant
-release. It does not alter any 004B case or package behavior. A clean-log rerun of
-that teardown hygiene patch had not yet been supplied when this document was
-updated.
+The obsolete synthetic Local Player Camera-request binding was removed by the
+ADR-026 QA migration. Player flow is now asserted only as a Camera Subject source.
 
 ## Verdict
 
@@ -185,6 +177,6 @@ ADR-004B
 Product defect discovered by initial case 16
   RESOLVED by IF-ADR-004C
 
-Current Camera negative-integrity blocker
-  NONE for accepted single-output boundary
+Current ADR-026 runtime certification
+  PENDING fresh Shared/Split Unity run
 ```

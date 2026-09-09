@@ -14,11 +14,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: Immersive.Framework.Runtime::Immersive.Framework.Authoring.ActivityAsset
   activityId: qa.c9r.camera.override.authority.activity
   activityName: QA C9R Camera Override Authority Activity
-  description: Explicit Activity override used by the C9R authority proof.
-  playerParticipationProjectionMode: 0
+  description: ADR-026 shared Player Subject lifecycle plus generic Camera arbitration
+    proof.
+  playerParticipationProjectionMode: 10
   playerParticipationZeroParticipantPolicy: 0
   playerParticipationExplicitSlotProfiles: []
-  playerParticipationRequirementLevel: 0
+  playerParticipationRequirementLevel: 40
   activityContentProfile: {fileID: 0}
   playerRelocationPolicy: 0
   activityEntryReadinessPolicy: 0

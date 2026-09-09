@@ -14,34 +14,25 @@ namespace ImmersiveFrameworkQA.GameFlow.Internal.Editor
             int frameBudget)
         {
             if (host == null)
-            {
                 throw new InvalidOperationException(
                     "Framework runtime startup requires the resolved FrameworkRuntimeHost.");
-            }
-
             if (frameBudget <= 0)
-            {
                 throw new ArgumentOutOfRangeException(
                     nameof(frameBudget),
                     "Framework runtime startup frame budget must be positive.");
-            }
 
             string lastDiagnostic =
                 "FrameworkRuntimeHost StartAsync completion has not been observed.";
             for (int frame = 0; frame < frameBudget; frame++)
             {
                 if (host == null)
-                {
                     throw new InvalidOperationException(
                         "FrameworkRuntimeHost was destroyed before StartAsync completed. " +
                         lastDiagnostic);
-                }
 
                 FrameworkRuntimeState state = host.State;
                 if (state.GameFlowStarted && state.CurrentRoute != null)
-                {
                     return;
-                }
 
                 lastDiagnostic =
                     $"gameFlowStarted='{state.GameFlowStarted}' " +
@@ -56,13 +47,8 @@ namespace ImmersiveFrameworkQA.GameFlow.Internal.Editor
                 $"within '{frameBudget}' frames. {lastDiagnostic}");
         }
 
-        internal static bool TryResolveUniqueHost(
-            out FrameworkRuntimeHost host)
-        {
-            return TryResolveUniqueHost(
-                out host,
-                out _);
-        }
+        internal static bool TryResolveUniqueHost(out FrameworkRuntimeHost host) =>
+            TryResolveUniqueHost(out host, out _);
 
         internal static bool TryResolveUniqueHost(
             out FrameworkRuntimeHost host,
@@ -70,48 +56,34 @@ namespace ImmersiveFrameworkQA.GameFlow.Internal.Editor
         {
             host = null;
             FrameworkRuntimeHost[] candidates =
-                Resources.FindObjectsOfTypeAll<
-                    FrameworkRuntimeHost>();
+                Resources.FindObjectsOfTypeAll<FrameworkRuntimeHost>();
+            var loaded = new List<FrameworkRuntimeHost>();
+            var seen = new HashSet<FrameworkRuntimeHost>();
 
-            var loaded =
-                new List<FrameworkRuntimeHost>();
-            var seen =
-                new HashSet<FrameworkRuntimeHost>();
-
-            for (int index = 0;
-                 index < candidates.Length;
-                 index++)
+            for (int index = 0; index < candidates.Length; index++)
             {
-                FrameworkRuntimeHost candidate =
-                    candidates[index];
+                FrameworkRuntimeHost candidate = candidates[index];
                 if (candidate == null ||
                     !candidate.gameObject.scene.IsValid() ||
                     !candidate.gameObject.scene.isLoaded ||
                     !seen.Add(candidate))
-                {
                     continue;
-                }
 
                 loaded.Add(candidate);
             }
 
             if (loaded.Count == 0)
             {
-                diagnostic =
-                    "host='unavailable' candidates='0'.";
+                diagnostic = "host='unavailable' candidates='0'.";
                 return false;
             }
 
             if (loaded.Count != 1)
             {
-                var details =
-                    new List<string>(loaded.Count);
-                for (int index = 0;
-                     index < loaded.Count;
-                     index++)
+                var details = new List<string>(loaded.Count);
+                for (int index = 0; index < loaded.Count; index++)
                 {
-                    FrameworkRuntimeHost candidate =
-                        loaded[index];
+                    FrameworkRuntimeHost candidate = loaded[index];
                     details.Add(
                         $"object='{candidate.name}' scene='{candidate.gameObject.scene.name}'.");
                 }
@@ -135,26 +107,20 @@ namespace ImmersiveFrameworkQA.GameFlow.Internal.Editor
             if (!TryResolveUniqueHost(
                     out FrameworkRuntimeHost resolved,
                     out diagnostic))
-            {
                 return false;
-            }
 
             host = resolved;
             return true;
         }
 
-        public static bool TryGetReady(
-            out string diagnostic)
+        public static bool TryGetReady(out string diagnostic)
         {
             if (!TryResolveUniqueHost(
                     out FrameworkRuntimeHost host,
                     out diagnostic))
-            {
                 return false;
-            }
 
-            FrameworkRuntimeState state =
-                host.State;
+            FrameworkRuntimeState state = host.State;
             diagnostic =
                 $"{diagnostic} gameFlowStarted='{state.GameFlowStarted}' route='{state.CurrentRouteName}' activity='{state.CurrentActivityName}' activityReady='{state.IsActivityReady}'.";
 
@@ -169,9 +135,7 @@ namespace ImmersiveFrameworkQA.GameFlow.Internal.Editor
         {
             snapshot = null;
             if (!TryResolveUniqueHost(out FrameworkRuntimeHost host))
-            {
                 return false;
-            }
 
             PlayerGameplayRuntimeHostModule module =
                 host.GetComponent<PlayerGameplayRuntimeHostModule>();

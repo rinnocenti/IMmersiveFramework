@@ -1,5 +1,6 @@
 using System;
 using Immersive.Framework.GameFlow;
+using ImmersiveFrameworkQA.GameFlow.Internal.Editor;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -7,13 +8,13 @@ using UnityEngine.SceneManagement;
 namespace ImmersiveFrameworkQA.Camera.Editor
 {
     /// <summary>
-    /// Aggregates the already-existing Camera proofs into one canonical user flow.
-    /// It does not duplicate Camera authority, materialization or lifecycle tests.
+    /// Coordinates the existing Camera rail across fresh Shared and Split Framework boots.
+    /// Camera topology preparation is verified from disk and the shared QA baseline is
+    /// restored after both successful and failed certification runs.
     /// </summary>
     internal static class QaCameraFullCertificationOrchestrator
     {
-        private const string MenuPath =
-            "Immersive Framework/QA/Camera/Run Full Camera QA";
+        private const string MenuPath = "Immersive Framework/QA/Camera/Run Full Camera QA";
         private const string Prefix = "[QA_CAMERA_FULL]";
         private const string HubScenePath =
             "Assets/ImmersiveFrameworkQA/Hub/Scenes/QA_Hub.unity";
@@ -23,162 +24,357 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             "RouteTrigger_Camera__Override_Authority";
         private const string Adr022MenuPath =
             "Immersive Framework/QA/Regressions/Camera/Run ADR-022 Presentation Materialization Regression";
-        private const string Adr022TerminalPrefix =
-            "[QA][ADR022 Presentation Models] PASS.";
-        private const int Adr022Cases = 14;
-        private const int CanonicalCases = 11;
-        private const int Adr004BCases = 18;
-        private const int Adr004CCases = 10;
-        private const int TotalCases =
-            Adr022Cases + CanonicalCases + Adr004BCases + Adr004CCases;
-        private const double TimeoutSeconds = 120d;
+        private const string Adr022TerminalPrefix = "[QA][ADR022 Presentation Models] PASS.";
+        private const string PhaseKey = "ImmersiveFrameworkQA.QA_CAMERA_FULL.Phase";
+        private const string FailureKey = "ImmersiveFrameworkQA.QA_CAMERA_FULL.Failure";
+        private const double TimeoutSeconds = 180d;
+        private const int EstablishedCaseCount = 14 + 11 + 18 + 10;
 
-        private enum Stage
+        private enum Phase
         {
-            Idle,
-            WaitingForCanonicalSceneEnter,
-            WaitingForCanonicalSceneExit
+            Idle = 0,
+            RunningShared = 10,
+            SharedPassed = 20,
+            RunningSplit = 30,
+            Certified = 40,
+            Failed = 50
         }
 
-        private static Stage stage;
+        private enum WatchStage
+        {
+            WaitingForHub,
+            WaitingForFrameworkReady,
+            WaitingForCameraSceneEnter,
+            WaitingForCameraSceneExit
+        }
+
+        private static WatchStage watchStage;
         private static double startedAt;
-        private static bool running;
+        private static bool watching;
+        private static RouteRequestTrigger pendingRouteTrigger;
+        private static string pendingReadinessStage = "framework-boot-unavailable";
+        private static string pendingReadinessMessage =
+            "Framework readiness has not been observed yet.";
+
+        [InitializeOnLoadMethod]
+        private static void RegisterHook()
+        {
+            EditorApplication.playModeStateChanged -= HandlePlayModeStateChanged;
+            EditorApplication.playModeStateChanged += HandlePlayModeStateChanged;
+        }
 
         [MenuItem(MenuPath, true)]
-        private static bool ValidateRun() =>
-            EditorApplication.isPlaying && !running;
+        private static bool ValidateRun() => !EditorApplication.isPlaying &&
+            CurrentPhase is Phase.Idle or Phase.Certified or Phase.Failed;
 
         [MenuItem(MenuPath, priority = 230)]
         private static void Run()
         {
-            if (!EditorApplication.isPlaying)
-            {
-                Debug.LogError(
-                    $"{Prefix} status='Failed' reason='PlayModeRequired'.");
-                return;
-            }
-
-            if (running)
-            {
-                Debug.LogWarning(
-                    $"{Prefix} status='Ignored' reason='AlreadyRunning'.");
-                return;
-            }
-
+            SessionState.EraseString(FailureKey);
             try
             {
-                Require(
-                    RunAdr022PresentationCertification(),
+                Require(RunAdr022PresentationCertification(),
                     "ADR-022 Presentation Materialization did not reach PASS 14/14.");
 
-                RouteRequestTrigger trigger =
-                    ResolveHubCameraRouteTrigger();
+                // Shared topology preparation is also the canonical repository-wide
+                // baseline repair. The guard reloads QA_UIGlobal from disk and refuses
+                // to continue if Camera/Brain/DefaultRig references were not persisted.
+                QaCameraPersistentBaselineGuard.PrepareAndVerify(
+                    QaCameraAdr026TopologyMode.Shared);
 
-                Require(trigger != null,
-                    "Full Camera QA requires the explicitly authored Camera RouteRequestTrigger.");
-                Require(!trigger.IsRequestInFlight,
-                    "Camera RouteRequestTrigger already has a request in flight.");
-
-                running = true;
-                stage = Stage.WaitingForCanonicalSceneEnter;
-                startedAt = EditorApplication.timeSinceStartup;
-                EditorApplication.update += Tick;
-
-                Debug.Log(
-                    $"{Prefix} status='Running' phase='ADR022PassedStartingCanonicalC9R' " +
-                    $"adr022='PASS' expectedCases='{TotalCases}'.");
-
-                trigger.RequestRoute();
+                SetPhase(Phase.RunningShared);
+                Debug.Log($"{Prefix} status='Running' phase='Shared' " +
+                    $"expectedEstablishedCases='{EstablishedCaseCount}' adr026Phases='2'.");
+                EditorApplication.isPlaying = true;
             }
             catch (Exception exception)
             {
-                Fail(exception.GetBaseException().Message);
+                Fail("prepare-shared", exception.GetBaseException().Message);
             }
+        }
+
+        private static void HandlePlayModeStateChanged(PlayModeStateChange state)
+        {
+            Phase phase = CurrentPhase;
+            if (state == PlayModeStateChange.EnteredPlayMode &&
+                phase is Phase.RunningShared or Phase.RunningSplit)
+            {
+                BeginWatching();
+                return;
+            }
+
+            if (state == PlayModeStateChange.EnteredEditMode && phase == Phase.SharedPassed)
+            {
+                EditorApplication.delayCall += PrepareSplitPhase;
+                return;
+            }
+
+            if (state == PlayModeStateChange.EnteredEditMode &&
+                phase is Phase.RunningShared or Phase.RunningSplit)
+            {
+                Fail(
+                    "play-mode-interrupted",
+                    $"Play Mode exited before Camera certification phase '{phase}' completed.");
+            }
+        }
+
+        private static void BeginWatching()
+        {
+            StopWatching();
+            watching = true;
+            watchStage = WatchStage.WaitingForHub;
+            startedAt = EditorApplication.timeSinceStartup;
+            pendingRouteTrigger = null;
+            pendingReadinessStage = "framework-boot-unavailable";
+            pendingReadinessMessage =
+                "QA Hub scene has not finished loading the canonical Camera Route trigger.";
+            EditorApplication.update += Tick;
         }
 
         private static void Tick()
         {
-            if (!running)
+            try
+            {
+                TickCore();
+            }
+            catch (Exception exception)
+            {
+                Fail("runtime-orchestration", exception.GetBaseException().Message);
+                if (EditorApplication.isPlaying)
+                {
+                    EditorApplication.isPlaying = false;
+                }
+            }
+        }
+
+        private static void TickCore()
+        {
+            if (!watching || !EditorApplication.isPlaying)
             {
                 StopWatching();
                 return;
             }
 
-            if (!EditorApplication.isPlaying)
-            {
-                Fail("Play Mode ended before Full Camera QA completed.");
-                return;
-            }
-
             if (EditorApplication.timeSinceStartup - startedAt > TimeoutSeconds)
             {
-                Fail(
-                    "Timed out waiting for canonical C9R evidence. " +
-                    DescribeCanonicalEvidence());
+                bool waitingOnReadiness =
+                    watchStage is WatchStage.WaitingForHub or WatchStage.WaitingForFrameworkReady;
+                string stage = waitingOnReadiness
+                    ? pendingReadinessStage
+                    : "runtime-timeout";
+                string reason = waitingOnReadiness
+                    ? pendingReadinessMessage
+                    : DescribeEvidence();
+                Fail(stage, reason);
+                EditorApplication.isPlaying = false;
                 return;
             }
 
-            if (stage == Stage.WaitingForCanonicalSceneEnter)
+            if (watchStage == WatchStage.WaitingForHub)
             {
-                Scene canonical =
-                    SceneManager.GetSceneByPath(CanonicalScenePath);
-                if (canonical.IsValid() && canonical.isLoaded)
+                pendingReadinessStage = "framework-boot-unavailable";
+                pendingReadinessMessage =
+                    "QA Hub scene has not finished loading the canonical Camera Route trigger.";
+                if (!TryResolveHubTrigger(out RouteRequestTrigger trigger))
                 {
-                    stage = Stage.WaitingForCanonicalSceneExit;
+                    return;
+                }
+
+                pendingRouteTrigger = trigger;
+                watchStage = WatchStage.WaitingForFrameworkReady;
+                return;
+            }
+
+            if (watchStage == WatchStage.WaitingForFrameworkReady)
+            {
+                if (pendingRouteTrigger == null)
+                {
+                    watchStage = WatchStage.WaitingForHub;
+                    return;
+                }
+
+                // The Camera Route can only be requested after the Framework has started
+                // Game Flow with the Hub Activity ready and after the trigger has received
+                // its canonical route-runtime port binding.
+                if (!QaH2FrameworkReadiness.TryGetReady(out string frameworkDiagnostic))
+                {
+                    pendingReadinessStage = "framework-boot-unavailable";
+                    pendingReadinessMessage =
+                        "Framework has not finished starting Game Flow with a ready Hub Activity. " +
+                        frameworkDiagnostic;
+                    return;
+                }
+
+                if (!pendingRouteTrigger.HasRouteRuntimeBinding)
+                {
+                    pendingReadinessStage = "route-runtime-unavailable";
+                    pendingReadinessMessage =
+                        "Camera Route trigger has not been bound to the Game Flow route runtime port. " +
+                        pendingRouteTrigger.RouteRuntimeBindingDiagnostic;
+                    return;
+                }
+
+                Require(!pendingRouteTrigger.IsRequestInFlight,
+                    "Camera Route trigger already has a request in flight.");
+                pendingRouteTrigger.RequestRoute();
+                watchStage = WatchStage.WaitingForCameraSceneEnter;
+                return;
+            }
+
+            Scene cameraScene = SceneManager.GetSceneByPath(CanonicalScenePath);
+            if (watchStage == WatchStage.WaitingForCameraSceneEnter)
+            {
+                if (cameraScene.IsValid() && cameraScene.isLoaded)
+                {
+                    watchStage = WatchStage.WaitingForCameraSceneExit;
+                }
+                return;
+            }
+
+            if (cameraScene.IsValid() && cameraScene.isLoaded)
+            {
+                if (CurrentPhase == Phase.RunningShared &&
+                    QaCameraOverrideAuthorityFixture.Adr026SharedExecuted &&
+                    !QaCameraOverrideAuthorityFixture.Adr026SharedPassed)
+                {
+                    throw new InvalidOperationException(
+                        QaCameraOverrideAuthorityFixture.Adr026SharedDiagnostic);
+                }
+
+                if (CurrentPhase == Phase.RunningSplit &&
+                    QaCameraOverrideAuthorityFixture.Adr026SplitExecuted &&
+                    !QaCameraOverrideAuthorityFixture.Adr026SplitPassed)
+                {
+                    throw new InvalidOperationException(
+                        QaCameraOverrideAuthorityFixture.Adr026SplitDiagnostic);
                 }
 
                 return;
             }
 
-            if (stage != Stage.WaitingForCanonicalSceneExit)
+            try
             {
-                return;
+                if (CurrentPhase == Phase.RunningShared)
+                {
+                    CompleteSharedPhase();
+                }
+                else if (CurrentPhase == Phase.RunningSplit)
+                {
+                    CompleteSplitPhase();
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"Unexpected Camera certification phase '{CurrentPhase}'.");
+                }
             }
+            catch (Exception exception)
+            {
+                Fail("runtime-evidence", exception.GetBaseException().Message);
+                EditorApplication.isPlaying = false;
+            }
+        }
 
-            Scene currentCanonical =
-                SceneManager.GetSceneByPath(CanonicalScenePath);
-            if (currentCanonical.IsValid() && currentCanonical.isLoaded)
+        private static void CompleteSharedPhase()
+        {
+            Require(QaCameraOverrideAuthorityFixture.Adr026SharedExecuted &&
+                    QaCameraOverrideAuthorityFixture.Adr026SharedPassed,
+                "ADR-026 Shared Camera proof failed. " +
+                QaCameraOverrideAuthorityFixture.Adr026SharedDiagnostic);
+            Require(QaCameraOverrideAuthorityFixture.GenericArbitrationExecuted &&
+                    QaCameraOverrideAuthorityFixture.GenericArbitrationPassed,
+                "Generic Camera arbitration did not complete.");
+            Require(AllLegacyEvidenceExecuted() && AllLegacyEvidencePassed(),
+                "ADR-004 lifecycle evidence is incomplete. " + DescribeEvidence());
+            Require(QaCameraAdr004BNegativeIntegrityRegression.RunCertification(),
+                "ADR-004B Negative Integrity certification failed.");
+            Require(QaCameraAdr004COwnerLifetimeIntegrityRegression.RunCertification(),
+                "ADR-004C Owner Lifetime certification failed.");
+
+            StopWatching();
+            SetPhase(Phase.SharedPassed);
+            Debug.Log($"{Prefix} status='SharedPassed' next='FreshSplitBoot'.");
+            EditorApplication.isPlaying = false;
+        }
+
+        private static void PrepareSplitPhase()
+        {
+            if (EditorApplication.isPlaying || CurrentPhase != Phase.SharedPassed)
             {
                 return;
             }
 
             try
             {
-                Require(
-                    AllEvidenceExecuted(),
-                    "Canonical C9R scene exited without producing the complete certification evidence. " +
-                    DescribeCanonicalEvidence());
-                Require(
-                    AllEvidencePassed(),
-                    "Canonical C9R completed with failed evidence. " +
-                    DescribeCanonicalEvidence());
-
-                bool adr004b =
-                    QaCameraAdr004BNegativeIntegrityRegression.RunCertification();
-                bool adr004c =
-                    QaCameraAdr004COwnerLifetimeIntegrityRegression.RunCertification();
-
-                Require(adr004b,
-                    "ADR-004B Negative Integrity certification failed or was blocked.");
-                Require(adr004c,
-                    "ADR-004C Owner Lifetime Integrity certification failed.");
-
-                Succeed();
+                QaCameraPersistentBaselineGuard.PrepareAndVerify(
+                    QaCameraAdr026TopologyMode.Split);
+                SetPhase(Phase.RunningSplit);
+                Debug.Log($"{Prefix} status='Running' phase='Split'.");
+                EditorApplication.isPlaying = true;
             }
             catch (Exception exception)
             {
-                Fail(exception.GetBaseException().Message);
+                Fail("prepare-split", exception.GetBaseException().Message);
             }
+        }
+
+        private static void CompleteSplitPhase()
+        {
+            Require(QaCameraOverrideAuthorityFixture.Adr026SplitExecuted &&
+                    QaCameraOverrideAuthorityFixture.Adr026SplitPassed,
+                "ADR-026 Split/Multi-Output proof failed. " +
+                QaCameraOverrideAuthorityFixture.Adr026SplitDiagnostic);
+
+            StopWatching();
+            SetPhase(Phase.Certified);
+            QaCameraPersistentBaselineGuard.RequestRestore("camera-full-certified");
+
+            Debug.Log($"{Prefix} status='Completed' verdict='CAMERA QA CERTIFIED' " +
+                "subjectsOccurrenceSafety='PASS' sharedCamera='PASS' playerCameraDecoupling='PASS' " +
+                "multiOutput='PASS' outputIsolation='PASS' viewOutputBinding='PASS' " +
+                "viewportSplitTopology='PASS' genericArbitration='PASS' negativeValidation='PASS' " +
+                $"mandatoryEstablishedCases='{EstablishedCaseCount}' " +
+                $"executedEstablishedCases='{EstablishedCaseCount}' " +
+                $"passedEstablishedCases='{EstablishedCaseCount}' adr026Phases='2/2' dimensions='9/9' " +
+                "next='RestoreCanonicalBaseline' missing='<none>' cleanup='Requested'.");
+            EditorApplication.isPlaying = false;
+        }
+
+        private static bool TryResolveHubTrigger(out RouteRequestTrigger resolved)
+        {
+            resolved = null;
+            Scene hub = SceneManager.GetSceneByPath(HubScenePath);
+            if (!hub.IsValid() || !hub.isLoaded)
+            {
+                return false;
+            }
+
+            int matches = 0;
+            foreach (GameObject root in hub.GetRootGameObjects())
+            {
+                foreach (RouteRequestTrigger candidate in
+                    root.GetComponentsInChildren<RouteRequestTrigger>(true))
+                {
+                    if (candidate == null ||
+                        candidate.gameObject.name != CameraRouteTriggerName)
+                    {
+                        continue;
+                    }
+
+                    matches++;
+                    resolved = candidate;
+                }
+            }
+
+            Require(matches == 1 && resolved != null,
+                $"Expected one authored Camera Route trigger, found '{matches}'.");
+            return true;
         }
 
         private static bool RunAdr022PresentationCertification()
         {
             string terminal = string.Empty;
-
-            void Capture(
-                string condition,
-                string stackTrace,
-                LogType type)
+            void Capture(string condition, string stackTrace, LogType type)
             {
                 if (!string.IsNullOrEmpty(condition) &&
                     condition.StartsWith(
@@ -192,10 +388,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             Application.logMessageReceived += Capture;
             try
             {
-                bool invoked =
-                    EditorApplication.ExecuteMenuItem(
-                        Adr022MenuPath);
-
+                bool invoked = EditorApplication.ExecuteMenuItem(Adr022MenuPath);
                 return invoked &&
                     terminal.StartsWith(
                         Adr022TerminalPrefix,
@@ -208,53 +401,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             }
         }
 
-        private static RouteRequestTrigger
-            ResolveHubCameraRouteTrigger()
-        {
-            Scene hub = SceneManager.GetSceneByPath(HubScenePath);
-            Require(
-                hub.IsValid() && hub.isLoaded,
-                "Run Full Camera QA from the loaded QA Hub scene.");
-
-            RouteRequestTrigger resolved = null;
-            int matches = 0;
-
-            foreach (GameObject root in hub.GetRootGameObjects())
-            {
-                if (root == null)
-                {
-                    continue;
-                }
-
-                RouteRequestTrigger[] triggers =
-                    root.GetComponentsInChildren<RouteRequestTrigger>(
-                        true);
-
-                for (int index = 0; index < triggers.Length; index++)
-                {
-                    RouteRequestTrigger candidate =
-                        triggers[index];
-
-                    if (candidate == null ||
-                        candidate.gameObject.name !=
-                        CameraRouteTriggerName)
-                    {
-                        continue;
-                    }
-
-                    matches++;
-                    resolved = candidate;
-                }
-            }
-
-            Require(
-                matches == 1 && resolved != null,
-                $"Expected exactly one authored Camera RouteRequestTrigger '{CameraRouteTriggerName}' in QA Hub. found='{matches}'.");
-
-            return resolved;
-        }
-
-        private static bool AllEvidenceExecuted() =>
+        private static bool AllLegacyEvidenceExecuted() =>
             QaCameraOverrideAuthorityFixture.Adr004BActivityLifecycleExecuted &&
             QaCameraOverrideAuthorityFixture.Adr004BRouteLifecycleExecuted &&
             QaCameraOverrideAuthorityFixture.Adr004BOwnerLossExecuted &&
@@ -266,7 +413,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             QaCameraOverrideAuthorityFixture.Adr004CActivityDestroyExecuted &&
             QaCameraOverrideAuthorityFixture.Adr004CRouteReenableExecuted;
 
-        private static bool AllEvidencePassed() =>
+        private static bool AllLegacyEvidencePassed() =>
             QaCameraOverrideAuthorityFixture.Adr004BActivityLifecyclePassed &&
             QaCameraOverrideAuthorityFixture.Adr004BRouteLifecyclePassed &&
             QaCameraOverrideAuthorityFixture.Adr004BOwnerLossInvariantPassed &&
@@ -278,41 +425,41 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             QaCameraOverrideAuthorityFixture.Adr004CActivityDestroyPassed &&
             QaCameraOverrideAuthorityFixture.Adr004CRouteReenablePassed;
 
-        private static string DescribeCanonicalEvidence() =>
-            $"activityExit='{QaCameraOverrideAuthorityFixture.Adr004BActivityLifecycleExecuted}/{QaCameraOverrideAuthorityFixture.Adr004BActivityLifecyclePassed}' " +
-            $"routeExit='{QaCameraOverrideAuthorityFixture.Adr004BRouteLifecycleExecuted}/{QaCameraOverrideAuthorityFixture.Adr004BRouteLifecyclePassed}' " +
-            $"ownerLoss='{QaCameraOverrideAuthorityFixture.Adr004BOwnerLossExecuted}/{QaCameraOverrideAuthorityFixture.Adr004BOwnerLossInvariantPassed}' " +
-            $"activityDisable='{QaCameraOverrideAuthorityFixture.Adr004CActivityDisableExecuted}/{QaCameraOverrideAuthorityFixture.Adr004CActivityDisablePassed}' " +
-            $"sessionDisable='{QaCameraOverrideAuthorityFixture.Adr004CSessionDisableExecuted}/{QaCameraOverrideAuthorityFixture.Adr004CSessionDisablePassed}' " +
-            $"nonWinner='{QaCameraOverrideAuthorityFixture.Adr004CNonWinnerDisableExecuted}/{QaCameraOverrideAuthorityFixture.Adr004CNonWinnerDisablePassed}' " +
-            $"winnerRestore='{QaCameraOverrideAuthorityFixture.Adr004CWinningRestoreExecuted}/{QaCameraOverrideAuthorityFixture.Adr004CWinningRestorePassed}' " +
-            $"idempotent='{QaCameraOverrideAuthorityFixture.Adr004CIdempotentCleanupExecuted}/{QaCameraOverrideAuthorityFixture.Adr004CIdempotentCleanupPassed}' " +
-            $"activityDestroy='{QaCameraOverrideAuthorityFixture.Adr004CActivityDestroyExecuted}/{QaCameraOverrideAuthorityFixture.Adr004CActivityDestroyPassed}' " +
-            $"routeReenable='{QaCameraOverrideAuthorityFixture.Adr004CRouteReenableExecuted}/{QaCameraOverrideAuthorityFixture.Adr004CRouteReenablePassed}'.";
+        private static string DescribeEvidence() =>
+            $"shared='{QaCameraOverrideAuthorityFixture.Adr026SharedExecuted}/" +
+            $"{QaCameraOverrideAuthorityFixture.Adr026SharedPassed}' " +
+            $"split='{QaCameraOverrideAuthorityFixture.Adr026SplitExecuted}/" +
+            $"{QaCameraOverrideAuthorityFixture.Adr026SplitPassed}' " +
+            $"generic='{QaCameraOverrideAuthorityFixture.GenericArbitrationExecuted}/" +
+            $"{QaCameraOverrideAuthorityFixture.GenericArbitrationPassed}' " +
+            $"activityExit='{QaCameraOverrideAuthorityFixture.Adr004BActivityLifecycleExecuted}/" +
+            $"{QaCameraOverrideAuthorityFixture.Adr004BActivityLifecyclePassed}' " +
+            $"routeExit='{QaCameraOverrideAuthorityFixture.Adr004BRouteLifecycleExecuted}/" +
+            $"{QaCameraOverrideAuthorityFixture.Adr004BRouteLifecyclePassed}'.";
 
-        private static void Succeed()
+        private static Phase CurrentPhase =>
+            (Phase)SessionState.GetInt(PhaseKey, (int)Phase.Idle);
+
+        private static void SetPhase(Phase phase) =>
+            SessionState.SetInt(PhaseKey, (int)phase);
+
+        private static void Fail(string stage, string reason)
         {
             StopWatching();
-            Debug.Log(
-                $"{Prefix} status='Completed' verdict='CAMERA QA CERTIFIED' " +
-                $"adr022Presentation='PASS' canonicalAuthority='PASS' " +
-                $"adr004NegativeIntegrity='PASS' adr004OwnerLifetime='PASS' " +
-                $"mandatoryCases='{TotalCases}' executedCases='{TotalCases}' passedCases='{TotalCases}'.");
-        }
+            SetPhase(Phase.Failed);
+            SessionState.SetString(FailureKey, reason ?? string.Empty);
+            QaCameraPersistentBaselineGuard.RequestRestore(
+                $"camera-full-failed:{stage}");
 
-        private static void Fail(string reason)
-        {
-            StopWatching();
-            Debug.LogError(
-                $"{Prefix} status='Failed' verdict='CAMERA QA NOT CERTIFIED' " +
-                $"reason='{Escape(reason)}'.");
+            Debug.LogError($"{Prefix} status='Failed' verdict='CAMERA QA NOT CERTIFIED' " +
+                $"stage='{stage}' next='FixAndRerun' missing='{Escape(reason)}' " +
+                "cleanup='RequestedCanonicalRestore'.");
         }
 
         private static void StopWatching()
         {
             EditorApplication.update -= Tick;
-            running = false;
-            stage = Stage.Idle;
+            watching = false;
             startedAt = 0d;
         }
 

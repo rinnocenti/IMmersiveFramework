@@ -1,78 +1,67 @@
-# Camera QA Consolidation Closure — 2026-08-10
+# Camera QA Consolidation Closure — updated 2026-09-08
 
-Status: **Current operational map**
+Status: **current operational map after ADR-026 migration**
 
-This document supersedes historical Camera menu inventories as the current
-operational QA map. The large `QA-SMOKE-CONSOLIDATION-AUDIT.md` remains a
-point-in-time R1 audit and is intentionally not rewritten to erase historical
-smokes that existed when that audit was made.
-
-## Current Camera QA surfaces
+## Retained surfaces
 
 ```text
 C9M Follow Pipeline
-  local CameraRigComposer materialization / Follow proof
-
-Session Camera Override Identity Authoring Regression
-  stable scoped authoring identities
+  local CameraRigComposer materialization
 
 Camera Output Session Binding Authoring Regression
-  persistent output references / validation
+  output identity, references and Default rig validation
 
 Persistent Camera Presentation Composition Regression
-  single persistent output composition
+  one-or-more distinct Outputs plus View-to-Output topology
 
-C9R Camera Override Authority
-  canonical positive lifecycle / precedence / restoration
+C9R / ADR-026 canonical fixture
+  Shared subjects, occurrence safety, Split/Multi-Output and generic authority
 
 ADR-004C Owner Lifetime Integrity
   abnormal component publication lifetime
 
 ADR-004B Negative Integrity
-  deterministic negatives + rollback + delegated lifecycle/authoring evidence
+  deterministic negatives, rollback and delegated lifecycle evidence
 ```
 
-## Removed historical/redundant Camera proofs
-
-The following old Camera QA surfaces were removed during consolidation because
-their responsibilities were historical, private/reflection-oriented or absorbed
-by the current canonical surfaces:
+## Audit classification
 
 ```text
-QaCameraPlayerAuthoringUxSmoke
-QaCameraRuntimeHostIntegrationRegression
-QaCut4LocalPlayerCameraPublicationOwnershipAuthoringSmoke
+keep
+  Hub -> Route -> Activity -> canonical Camera scene -> fixture -> Hub
+  Activity/Route/Session precedence and ADR-004B/004C cleanup evidence
+
+migrate
+  single-output composition -> 1..N Outputs with exact unique identities
+  reflection validation -> public topology/authoring contracts
+  Player baseline restoration -> authored Output Default restoration
+
+remove
+  QaC9RLocalPlayerCameraRequestBinding
+  LocalPlayerCameraRequestPublisher dependencies
+  LocalPlayer owner/lifetime assertions
+  assumption that a second valid Output is an error
+
+extend
+  Shared two-player join/leave/rejoin occurrence proof
+  Split View-to-Output binding, viewport and output-isolation proof
 ```
 
-Their removal does not reduce current Camera certification coverage.
+The owning surface remains `QAFramework/Camera`; the Framework package owns the
+runtime contracts and is consumed read-only by this QA cut.
 
 ## Current execution
 
 ```text
-Immersive Framework > QA > Setup > Camera >
-Install Camera Override Authority QA
-
-Play Mode
-  -> Camera Override Authority from QA Hub
-  -> C9R 11/11
-  -> ADR-004C 10/10
-  -> ADR-004B 18/18
+Immersive Framework > QA > Camera > Run Full Camera QA
+  -> ADR-022 Edit Mode regression
+  -> author Shared topology in Edit Mode
+  -> fresh Play Mode / Hub / canonical fixture / ADR-004B / ADR-004C
+  -> return to Edit Mode and author Split topology
+  -> fresh Play Mode / Hub / canonical fixture
+  -> one final multidimensional diagnostic
 ```
 
-## Certification state
-
-```text
-C9R      CERTIFIED POSITIVE LIFECYCLE 11/11
-ADR004C  CERTIFIED OWNER LIFETIME     10/10
-ADR004B  CERTIFIED NEGATIVE INTEGRITY 18/18
-```
-
-No second Camera fixture, manager, context, service or orchestrator is part of
-the current architecture.
-
-## Residual QA hygiene
-
-The v10 synthetic Local Player teardown patch addresses redundant
-`release-not-found` logging after certification. It is cleanup hygiene, not a new
-Camera contract or certification gate. A clean-log rerun may be recorded after
-the patch is applied.
+Historical inventories remain point-in-time evidence. Historical C9R/ADR-004
+PASS lines must not be used as ADR-026 certification. A fresh Unity run is still
+required.

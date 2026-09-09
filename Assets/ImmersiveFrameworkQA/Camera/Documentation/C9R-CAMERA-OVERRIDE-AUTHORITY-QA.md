@@ -1,128 +1,80 @@
-# C9R — Camera Override Authority QA
+# C9R — Camera Authority and ADR-026 QA
 
-Status: **Canonical positive Camera authority regression**  
-Last updated: **2026-08-10**
+Status: **canonical Camera lifecycle and topology regression**
+Last updated: **2026-09-08**
 
-## Contract
+## Product contract
 
-The current product precedence convention is:
+Ordinary players publish subject availability. They do not own or publish a
+`CameraRequest`. A `CameraSharedComposition` selects the active subjects from the
+joined-player set and rejects stale player occurrences after leave/rejoin.
 
-```text
-Local Player  50
-Activity     100
-Route        200
-Session      300
-```
-
-Higher precedence wins. Request timing is not priority policy.
-
-Route and Activity lifecycle entry make their override available. The QA
-explicitly requests/releases overrides, verifies restoration and lets canonical
-owner exit prove cleanup.
-
-## Composition
-
-Persistent QA content owns exactly one:
+Generic Camera authority is output-scoped:
 
 ```text
-CameraOutputSessionBinding
-SessionCameraOverrideBinding
-Unity Camera
-CinemachineBrain
+Output Default   baseline
+Activity         100
+Route            200
+Session          300
 ```
 
-The arbitration scene does not create another physical Camera output. Player,
-Activity and Route consumers receive the persistent output through
-`CameraOutputInjectionRuntime`.
+Higher precedence wins; release or owner exit restores the next valid request and
+ultimately the authored Output Default rig.
 
-## Setup
-
-Install/repair the existing C9R composition:
+## Existing execution rail
 
 ```text
-Immersive Framework > QA > Setup > Camera >
-Install Camera Override Authority QA
+QA Hub
+  -> RouteTrigger_Camera__Override_Authority
+  -> QA_PlayerCameraArbitrationRoute
+  -> startup Activity
+  -> QA_PlayerCameraArbitration scene
+  -> QaCameraOverrideAuthorityFixture
+  -> back-to-Hub Route
 ```
 
-Successful setup emits:
+The fixture is repaired in place. There is no second Camera service, context,
+manager or parallel orchestration path.
+
+## ADR-026 Shared phase
+
+The persistent composition authors two distinct Outputs but binds the shared View
+to Output A in fullscreen. The fixture proves:
+
+- P1 join creates one live subject and target-group member;
+- P2 join creates the second member;
+- P1 leave removes its exact occurrence while P2 remains;
+- P1 rejoin creates a new occurrence and never revives stale P1-A;
+- View, composer, Cinemachine camera and Output identity stay stable;
+- ordinary Player flow publishes zero Camera requests on both Outputs;
+- cleanup leaves both players and closes joining.
+
+## ADR-026 Split/Multi-Output phase
+
+The second fresh boot binds two Views to two distinct Outputs with left/right
+viewports. It proves distinct Camera/Brain/default-rig materialization, exact
+binding cardinality, missing-output rejection, independent request arbitration and
+restoration to each Output's own Default rig.
+
+## Setup and execution
 
 ```text
-[_CAMERA_OVERRIDE_AUTHORITY_SETUP] status='Succeeded'
+Immersive Framework > QA > Setup > Camera > Prepare ADR-026 Shared Phase
+Immersive Framework > QA > Setup > Camera > Prepare ADR-026 Split Phase
+Immersive Framework > QA > Camera > Run Full Camera QA
 ```
 
-## Canonical 11 cases
+The full runner also executes ADR-022, generic Activity/Route/Session authority,
+ADR-004B negative integrity and ADR-004C owner lifetime. It changes topology only
+in Edit Mode and enters a fresh Play Mode session for each ADR-026 phase.
 
-C9R keeps one fixed positive-contract count:
+Expected terminal evidence is causal and machine-readable:
 
 ```text
-01 player-default
-02 activity-request
-03 route-request
-04 session-request
-05 session-release-restores-route
-06 route-release-restores-activity
-07 activity-release-restores-player
-08 duplicate-request
-09 duplicate-release
-10 activity-lifecycle-cleanup
-11 route-lifecycle-cleanup
+[QA_CAMERA_ADR026] status='Passed' phase='Shared' ...
+[QA_CAMERA_ADR026] status='Passed' phase='Split' ...
+[QA_CAMERA_FULL] status='Completed' verdict='CAMERA QA CERTIFIED' ...
 ```
 
-Final success evidence:
-
-```text
-[CAMERA_RUNTIME_HOST_INTEGRATION_REGRESSION]
-status='Passed'
-phase='canonical-override-fixture'
-cases='11'
-```
-
-## ADR-004B / ADR-004C evidence reuse
-
-C9R remains the positive lifecycle owner. It also records focused evidence for
-004B/004C while keeping the canonical count at 11.
-
-Current additional probes include:
-
-- Activity abnormal disable;
-- non-winning Activity disable under Route winner;
-- Session disable;
-- Activity destruction;
-- Route abnormal disable / re-enable;
-- cleanup idempotence;
-- no silent re-publication.
-
-These probes do not become additional C9R cases. They are consumed by the ADR
-certification runners in the **same Play Mode session**.
-
-Expected sequence:
-
-```text
-Setup Camera
-  -> Play Mode
-  -> Camera Override Authority / C9R
-  -> C9R 11/11
-  -> ADR-004C 10/10
-  -> ADR-004B 18/18
-```
-
-## Current certified result
-
-```text
-C9R      PASS 11/11
-ADR004C  PASS 10/10
-ADR004B  PASS 18/18
-```
-
-The former 004B abnormal Route-owner probe now proves `orphan='False'` after the
-004C package hardening.
-
-## QA teardown note
-
-A post-certification teardown diagnostic in the synthetic Local Player binding
-was classified as QA cleanup hygiene: the local publisher could attempt a
-redundant release after its request was already absent from the output context.
-The v10 QA-only patch reconciles that state before releasing again.
-
-This teardown hygiene is outside the canonical 11-case result and does not
-replace or weaken C9R evidence.
+Do not record PASS from static inspection. Certification requires a clean Unity
+compile/import and the full runtime run.

@@ -20,5 +20,5 @@ MonoBehaviour:
   startupActivity: {fileID: 11400000, guid: 2962537da41ed2b4e9e39ccd28c92f86, type: 2}
   playerSpatialEntryPolicy: 0
   transitionGateMode: 30
-  description: C9R authority proof for synthetic LocalPlayer, Activity, Route and
-    Session camera requests.
+  description: ADR-026 shared/multi-output proof plus Activity, Route and Session
+    Camera arbitration.

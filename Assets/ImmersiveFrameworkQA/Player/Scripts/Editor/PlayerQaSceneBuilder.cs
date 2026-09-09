@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using Immersive.Framework.Actors;
 using Immersive.Framework.Authoring;
+using Immersive.Framework.CameraAuthoring;
 using Immersive.Framework.Editor.PlayerParticipation;
 using Immersive.Framework.GameFlow;
 using Immersive.Framework.PlayerParticipation;
@@ -109,22 +110,26 @@ namespace ImmersiveFrameworkQA.Player.Editor
                 PlayerQaPaths.DefaultPresentationPath,
                 "QA_DefaultPresentation",
                 PrimitiveType.Capsule,
-                gameplayInputReaderCount: 1);
+                gameplayInputReaderCount: 1,
+                includeCameraSubject: true);
             GameObject alternatePresentation = EnsurePresentation(
                 PlayerQaPaths.AlternatePresentationPath,
                 "QA_AlternatePresentation",
                 PrimitiveType.Cube,
-                gameplayInputReaderCount: 1);
+                gameplayInputReaderCount: 1,
+                includeCameraSubject: true);
             GameObject noGameplayReaderPresentation = EnsurePresentation(
                 PlayerQaPaths.NoGameplayReaderPresentationPath,
                 "QA_NoGameplayReaderPresentation",
                 PrimitiveType.Sphere,
-                gameplayInputReaderCount: 0);
+                gameplayInputReaderCount: 0,
+                includeCameraSubject: false);
             GameObject ambiguousGameplayReaderPresentation = EnsurePresentation(
                 PlayerQaPaths.AmbiguousGameplayReaderPresentationPath,
                 "QA_AmbiguousGameplayReaderPresentation",
                 PrimitiveType.Cylinder,
-                gameplayInputReaderCount: 2);
+                gameplayInputReaderCount: 2,
+                includeCameraSubject: false);
             ActorProfile defaultActor = EnsureActorProfile(
                 PlayerQaPaths.DefaultActorPath,
                 "QA_DefaultActor",
@@ -424,7 +429,8 @@ namespace ImmersiveFrameworkQA.Player.Editor
             string path,
             string name,
             PrimitiveType primitive,
-            int gameplayInputReaderCount)
+            int gameplayInputReaderCount,
+            bool includeCameraSubject)
         {
             if (gameplayInputReaderCount < 0 || gameplayInputReaderCount > 2)
             {
@@ -445,6 +451,19 @@ namespace ImmersiveFrameworkQA.Player.Editor
                     var secondReader = new GameObject("GameplayReader_B");
                     secondReader.transform.SetParent(root.transform, false);
                     secondReader.AddComponent<PlayerGameplayInputReader>();
+                }
+
+                if (includeCameraSubject)
+                {
+                    var cameraSubjectObject = new GameObject("Camera Subject");
+                    cameraSubjectObject.transform.SetParent(root.transform, false);
+                    cameraSubjectObject.transform.localPosition = new Vector3(0f, 1.6f, 0f);
+                    ActorCameraSubjectAuthoring cameraSubject =
+                        root.AddComponent<ActorCameraSubjectAuthoring>();
+                    SetObject(
+                        cameraSubject,
+                        "observationTransform",
+                        cameraSubjectObject.transform);
                 }
 
                 GameObject visual = GameObject.CreatePrimitive(primitive);

@@ -51,7 +51,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             Execute(results, "14-activity-lifecycle-exit", Case14ActivityLifecycleExit);
             Execute(results, "15-route-lifecycle-exit", Case15RouteLifecycleExit);
             Execute(results, "16-abnormal-owner-loss", Case16AbnormalOwnerLoss);
-            Execute(results, "17-duplicate-persistent-output", Case17DuplicatePersistentOutput);
+            Execute(results, "17-duplicate-output-id", Case17DuplicatePersistentOutput);
             Execute(results, "18-invalid-output-binding-references", Case18InvalidOutputBindingReferences);
 
             Require(
@@ -596,11 +596,11 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         {
             IReadOnlyList<string> evidence =
                 QaPersistentCameraPresentationCompositionRegression.RunAdr004BDuplicateOutputCertification();
-            Require(evidence != null && evidence.Contains("two-outputs"),
-                "Canonical Persistent Camera composition regression did not execute the two-output blocking case.");
+            Require(evidence != null && evidence.Contains("duplicate-output-id"),
+                "Canonical Persistent Camera composition regression did not execute the duplicate Output ID blocking case.");
 
             return
-                "operation='PersistentCompositionValidation' outputs='2' expected='Blocked' " +
+                "operation='OutputTopologyValidation' outputs='2' duplicateId='True' expected='Blocked' " +
                 "delegated='QaPersistentCameraPresentationCompositionRegression' diagnostic='Actionable'.";
         }
 
@@ -758,6 +758,18 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 Set(binding, "cinemachineBrain", brain);
                 Set(binding, "initializeOnAwake", false);
                 Set(binding, "logDiagnostics", false);
+
+                var defaultRigRoot = new GameObject("Rig_default");
+                defaultRigRoot.transform.SetParent(root.transform, false);
+                CameraRigComposer defaultComposer =
+                    defaultRigRoot.AddComponent<CameraRigComposer>();
+                var defaultCameraObject = new GameObject("Cinemachine_default");
+                defaultCameraObject.transform.SetParent(defaultRigRoot.transform, false);
+                CinemachineCamera defaultCamera =
+                    defaultCameraObject.AddComponent<CinemachineCamera>();
+                defaultCamera.enabled = false;
+                defaultComposer.EditorSetGeneratedReference(defaultCamera);
+                Set(binding, "defaultCameraRig", defaultComposer);
 
                 var targetObject = new GameObject("Target");
                 targetObject.transform.SetParent(root.transform, false);

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Immersive.Framework.Actors;
+using Immersive.Framework.CameraAuthoring;
 using Immersive.Framework.Authoring;
 using Immersive.Framework.Editor.PlayerParticipation;
 using Immersive.Framework.PlayerParticipation;
@@ -21,7 +22,7 @@ namespace ImmersiveFrameworkQA.Player.Editor
         private const string Prefix = "[QA_PLAYER_AUTHORING]";
         private const string MenuPath =
             "Immersive Framework/QA/Player/Run Authoring Contract";
-        private const int ExpectedCaseCount = 13;
+        private const int ExpectedCaseCount = 14;
 
         [MenuItem(MenuPath, true)]
         private static bool ValidateRun() =>
@@ -87,6 +88,9 @@ namespace ImmersiveFrameworkQA.Player.Editor
 
                 ValidatePresentations(defaultPresentation, alternatePresentation);
                 completed.Add("presentations");
+
+                ValidateRequiredCameraSubjectTransform();
+                completed.Add("required-camera-subject-transform");
 
                 ValidateReaderCardinalityFixtures(
                     noGameplayReaderPresentation,
@@ -268,6 +272,25 @@ namespace ImmersiveFrameworkQA.Player.Editor
                 "QA_AlternatePresentation");
         }
 
+        private static void ValidateRequiredCameraSubjectTransform()
+        {
+            var root = new GameObject("QA Missing Camera Subject Transform");
+            try
+            {
+                ActorCameraSubjectAuthoring authoring =
+                    root.AddComponent<ActorCameraSubjectAuthoring>();
+                Require(
+                    !authoring.TryValidateConfiguration(out string issue) &&
+                    issue.IndexOf("requires an explicit Camera Subject Transform", StringComparison.Ordinal) >= 0 &&
+                    authoring.ObservationTransform == null,
+                    "Authored Camera Subject without its required Transform must block without falling back to the Actor root.");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(root);
+            }
+        }
+
         private static void ValidatePresentation(
             GameObject presentation,
             string label,
@@ -283,6 +306,17 @@ namespace ImmersiveFrameworkQA.Player.Editor
                 presentation.GetComponentsInChildren<PlayerActorDeclaration>(true).Length == 0 &&
                 presentation.GetComponentsInChildren<PlayerGameplayInputReader>(true).Length == 1,
                 $"{label} Presentation must contain exactly one PlayerGameplayInputReader and no Player Actor infrastructure.");
+
+            ActorCameraSubjectAuthoring[] cameraSubjects =
+                presentation.GetComponentsInChildren<ActorCameraSubjectAuthoring>(true);
+            string cameraSubjectIssue = string.Empty;
+            Require(
+                cameraSubjects.Length == 1 &&
+                cameraSubjects[0].gameObject == presentation &&
+                cameraSubjects[0].TryValidateConfiguration(out cameraSubjectIssue) &&
+                cameraSubjects[0].ObservationTransform != presentation.transform &&
+                cameraSubjects[0].ObservationTransform.IsChildOf(presentation.transform),
+                $"{label} Presentation requires one explicit child Camera Subject Transform. {cameraSubjectIssue}");
         }
 
         private static void ValidateReaderCardinalityFixtures(

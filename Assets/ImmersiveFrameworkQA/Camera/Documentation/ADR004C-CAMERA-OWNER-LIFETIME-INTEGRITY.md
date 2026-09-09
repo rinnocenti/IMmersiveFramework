@@ -141,14 +141,8 @@ C9R      11/11 PASS
 - re-enable does not silently publish;
 - explicit publication remains possible only while logical owner state is valid.
 
-## Post-certification QA teardown hygiene
-
-The later synthetic Local Player `release-not-found` teardown diagnostic is a
-QA-only local-state reconciliation issue. It occurs after the C9R/004C/004B gates
-are already green and does not indicate an owner-lifetime package regression.
-
-The v10 QA patch addresses only that teardown hygiene. A clean-log rerun of v10
-was still pending when this document was updated.
+The obsolete synthetic Local Player Camera-request binding was removed by the
+ADR-026 QA migration. These cases now restore the authored Output Default rig.
 
 ## Verdict
 
