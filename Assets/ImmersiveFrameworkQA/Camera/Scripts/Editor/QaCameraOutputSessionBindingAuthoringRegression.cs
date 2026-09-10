@@ -11,18 +11,17 @@ using UnityEngine;
 namespace ImmersiveFrameworkQA.Camera.Editor
 {
     /// <summary>
-    /// Regression for the persistent Camera Output authoring surface.
-    /// The regression uses reflection only for package-internal Editor APIs.
+    /// Consumer regression for the current physical Camera Output authoring
+    /// surface. Output identity is owned by CameraOutputDefinition; this proof
+    /// covers Inspector validation of Camera, CinemachineBrain and Default Rig.
     /// </summary>
     internal static class QaCameraOutputAuthoringAuthoringRegression
     {
         private const string MenuPath =
-            "Immersive Framework/QA/Regressions/Camera/Run Camera Output Session Binding Authoring Regression";
+            "Immersive Framework/QA/Regressions/Camera/Run Camera Output Physical Authoring Regression";
 
         private const string ValidatorTypeName =
             "Immersive.Framework.Editor.CameraAuthoring.CameraOutputSessionAuthoringValidator";
-        private const string EditorTypeName =
-            "Immersive.Framework.Editor.Camera.Bindings.CameraOutputAuthoringEditor";
         private const string BrainTypeName =
             "Unity.Cinemachine.CinemachineBrain";
 
@@ -31,13 +30,16 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private const BindingFlags StaticAny =
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
+        [MenuItem(MenuPath, true)]
+        private static bool ValidateRun() => !EditorApplication.isPlaying;
+
         [MenuItem(MenuPath, priority = 236)]
         private static void Run()
         {
             IReadOnlyList<string> completed = RunForCertification();
 
             Debug.Log(
-                "[QA_CAMERA_OUTPUT_SESSION_BINDING_AUTHORING] " +
+                "[QA_CAMERA_OUTPUT_PHYSICAL_AUTHORING] " +
                 "status='Passed' " +
                 $"cases='{completed.Count}' " +
                 $"evidence='{string.Join(",", completed)}'.");
@@ -47,9 +49,6 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         {
             var completed = new List<string>();
 
-            VerifyAutomaticId(completed);
-            VerifyResetPreservesExistingId(completed);
-            VerifyGenerateOnlyWhenMissing(completed);
             VerifyValidationCase(completed, "valid-composition", true, true, true, true);
             VerifyValidationCase(completed, "missing-camera", false, true, true, false);
             VerifyValidationCase(completed, "missing-brain", true, false, true, false);
@@ -67,104 +66,6 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             return completed;
         }
 
-        private static void VerifyAutomaticId(
-            ICollection<string> completed)
-        {
-            var root = new GameObject("QA_CameraOutput_AutomaticId");
-            root.SetActive(false);
-            try
-            {
-                CameraOutputAuthoring binding =
-                    root.AddComponent<CameraOutputAuthoring>();
-                Require(
-                    !string.IsNullOrWhiteSpace(binding.OutputIdText),
-                    "A newly created Camera Output Session Binding did not receive an Output ID.");
-                completed.Add("automatic-id");
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(root);
-            }
-        }
-
-        private static void VerifyResetPreservesExistingId(
-            ICollection<string> completed)
-        {
-            var root = new GameObject("QA_CameraOutput_PreserveId");
-            root.SetActive(false);
-            try
-            {
-                CameraOutputAuthoring binding =
-                    root.AddComponent<CameraOutputAuthoring>();
-                SetOutputId(binding, "qa.camera.output.existing");
-
-                MethodInfo reset = typeof(CameraOutputAuthoring).GetMethod(
-                    "Reset",
-                    InstanceAny);
-                Require(reset != null,
-                    "Camera Output Reset hook is unavailable.");
-                reset.Invoke(binding, null);
-
-                Require(
-                    binding.OutputIdText == "qa.camera.output.existing",
-                    "Reset replaced an existing Camera Output ID.");
-                completed.Add("existing-id-preserved");
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(root);
-            }
-        }
-
-        private static void VerifyGenerateOnlyWhenMissing(
-            ICollection<string> completed)
-        {
-            var root = new GameObject("QA_CameraOutput_GenerateId");
-            root.SetActive(false);
-            UnityEditor.Editor editor = null;
-
-            try
-            {
-                CameraOutputAuthoring binding =
-                    root.AddComponent<CameraOutputAuthoring>();
-                SetOutputId(binding, string.Empty);
-
-                Type editorType = ResolveType(EditorTypeName);
-                editor = UnityEditor.Editor.CreateEditor(binding, editorType);
-                Require(editor != null,
-                    "Camera Output custom Editor could not be created.");
-
-                MethodInfo generate = editorType.GetMethod(
-                    "GenerateOutputId",
-                    InstanceAny);
-                Require(generate != null,
-                    "Camera Output Generate action is unavailable.");
-
-                generate.Invoke(editor, null);
-                string generated = binding.OutputIdText;
-                Require(
-                    !string.IsNullOrWhiteSpace(generated),
-                    "Generate did not fill an empty Camera Output ID.");
-
-                SetOutputId(binding, "qa.camera.output.preserved");
-                generate.Invoke(editor, null);
-                Require(
-                    binding.OutputIdText == "qa.camera.output.preserved",
-                    "Generate replaced a populated Camera Output ID.");
-
-                completed.Add("generate-missing-only");
-            }
-            finally
-            {
-                if (editor != null)
-                {
-                    UnityEngine.Object.DestroyImmediate(editor);
-                }
-
-                UnityEngine.Object.DestroyImmediate(root);
-            }
-        }
-
         private static void VerifyValidationCase(
             ICollection<string> completed,
             string caseName,
@@ -174,6 +75,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             bool expectedValid)
         {
             var roots = new List<GameObject>();
+            CameraOutputDefinition definition = null;
 
             try
             {
@@ -181,9 +83,9 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 outputRoot.SetActive(false);
                 roots.Add(outputRoot);
 
+                definition = QaCameraAuthoringFixtures.CreateOutputDefinition();
                 CameraOutputAuthoring binding =
                     outputRoot.AddComponent<CameraOutputAuthoring>();
-                SetOutputId(binding, $"qa.camera.output.{caseName}");
                 var rigRoot = new GameObject($"QA_{caseName}_DefaultRig");
                 rigRoot.transform.SetParent(outputRoot.transform, false);
                 CameraRigComposer defaultRig =
@@ -210,12 +112,12 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                     brain = brainRoot.AddComponent(ResolveType(BrainTypeName));
                 }
 
-                AssignOutputReferences(binding, camera, brain, defaultRig);
+                AssignOutputReferences(binding, definition, camera, brain, defaultRig);
                 ValidationProbe validation = Validate(binding);
 
                 Require(
                     validation.IsValid == expectedValid,
-                    $"Case '{caseName}' returned unexpected validity='{validation.IsValid}'.");
+                    $"Case '{caseName}' returned unexpected validity='{validation.IsValid}' diagnostics='{validation.Diagnostics}'.");
 
                 if (!expectedValid)
                 {
@@ -233,6 +135,8 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 {
                     UnityEngine.Object.DestroyImmediate(roots[index]);
                 }
+
+                QaCameraAuthoringFixtures.Destroy(definition);
             }
         }
 
@@ -277,25 +181,16 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 string.Join(" | ", diagnostics));
         }
 
-        private static void SetOutputId(
-            CameraOutputAuthoring binding,
-            string value)
-        {
-            var serialized = new SerializedObject(binding);
-            SerializedProperty property = serialized.FindProperty("outputId");
-            Require(property != null,
-                "Camera Output ID serialized field is unavailable.");
-            property.stringValue = value;
-            serialized.ApplyModifiedPropertiesWithoutUndo();
-        }
-
         private static void AssignOutputReferences(
             CameraOutputAuthoring binding,
+            CameraOutputDefinition definition,
             UnityEngine.Camera camera,
             Component brain,
             CameraRigComposer defaultRig)
         {
             var serialized = new SerializedObject(binding);
+            SerializedProperty definitionProperty =
+                serialized.FindProperty("outputDefinition");
             SerializedProperty cameraProperty =
                 serialized.FindProperty("unityCamera");
             SerializedProperty brainProperty =
@@ -303,10 +198,11 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             SerializedProperty defaultRigProperty =
                 serialized.FindProperty("defaultCameraRig");
 
-            Require(cameraProperty != null && brainProperty != null &&
-                    defaultRigProperty != null,
+            Require(definitionProperty != null && cameraProperty != null &&
+                    brainProperty != null && defaultRigProperty != null,
                 "Camera Output component references are unavailable.");
 
+            definitionProperty.objectReferenceValue = definition;
             cameraProperty.objectReferenceValue = camera;
             brainProperty.objectReferenceValue = brain;
             defaultRigProperty.objectReferenceValue = defaultRig;

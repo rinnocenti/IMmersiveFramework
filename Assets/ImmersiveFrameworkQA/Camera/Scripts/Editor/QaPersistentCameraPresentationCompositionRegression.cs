@@ -36,6 +36,8 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             VerifyViewTopology(completed, "valid-split-viewports", false, false, true);
             VerifyViewTopology(completed, "conflicting-output-binding", true, false, false);
             VerifyViewTopology(completed, "invalid-viewport", false, true, false);
+            VerifySimpleAdvancedDistinctOutputs(completed);
+            VerifySimpleAdvancedSameOutputConflict(completed);
             return completed;
         }
 
@@ -54,16 +56,21 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             bool expectedSuccess)
         {
             var roots = new List<GameObject>();
+            var definitions = new List<CameraOutputDefinition>();
             CameraOutputSessionTopology topology = null;
             try
             {
                 var outputs = new List<CameraOutputAuthoring>();
+                string duplicateStableId = duplicateId
+                    ? "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    : null;
                 for (int index = 0; index < outputCount; index++)
                 {
-                    outputs.Add(CreateOutput(
-                        roots,
-                        duplicateId ? "qa.camera.duplicate" : $"qa.camera.output.{index}",
-                        index));
+                    CameraOutputDefinition definition =
+                        QaCameraAuthoringFixtures.CreateOutputDefinition(
+                            duplicateStableId ?? Guid.NewGuid().ToString("N"));
+                    definitions.Add(definition);
+                    outputs.Add(CreateOutput(roots, definition, index));
                 }
 
                 bool succeeded = CameraOutputSessionTopology.TryCreate(
@@ -87,12 +94,14 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 topology?.Dispose();
                 for (int index = roots.Count - 1; index >= 0; index--)
                     UnityEngine.Object.DestroyImmediate(roots[index]);
+                for (int index = definitions.Count - 1; index >= 0; index--)
+                    QaCameraAuthoringFixtures.Destroy(definitions[index]);
             }
         }
 
         private static CameraOutputAuthoring CreateOutput(
             ICollection<GameObject> roots,
-            string outputId,
+            CameraOutputDefinition outputDefinition,
             int index)
         {
             var root = new GameObject($"QA_ADR026_Output_{index}");
@@ -106,7 +115,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             CinemachineCamera cinemachine = rigRoot.AddComponent<CinemachineCamera>();
             composer.EditorSetGeneratedReference(cinemachine);
             CameraOutputAuthoring output = root.AddComponent<CameraOutputAuthoring>();
-            Set(output, "outputId", outputId);
+            Set(output, "outputDefinition", outputDefinition);
             Set(output, "unityCamera", camera);
             Set(output, "cinemachineBrain", brain);
             Set(output, "defaultCameraRig", composer);
@@ -147,14 +156,148 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             completed.Add(caseName);
         }
 
+        private static void VerifySimpleAdvancedDistinctOutputs(ICollection<string> completed)
+        {
+            var roots = new List<GameObject>();
+            var definitions = new List<ScriptableObject>();
+            try
+            {
+                CameraViewDefinition viewA = QaCameraAuthoringFixtures.CreateViewDefinition();
+                CameraViewDefinition viewB = QaCameraAuthoringFixtures.CreateViewDefinition();
+                CameraOutputDefinition outputA = QaCameraAuthoringFixtures.CreateOutputDefinition();
+                CameraOutputDefinition outputB = QaCameraAuthoringFixtures.CreateOutputDefinition();
+                definitions.Add(viewA);
+                definitions.Add(viewB);
+                definitions.Add(outputA);
+                definitions.Add(outputB);
+
+                CameraSharedComposition composition = CreateComposition(
+                    roots, viewA, outputA, new CameraViewport(0f, 0f, 1f, 1f));
+                CameraViewOutputPolicyAuthoring policy = CreatePolicy(
+                    roots, viewB, outputB, new CameraViewport(0f, 0f, 1f, 1f));
+
+                Require(composition.TryCreateAssociationBinding(
+                        out CameraViewOutputBinding simple, out string simpleIssue),
+                    $"Simple association failed. {simpleIssue}");
+                Require(policy.TryBuildTopology(
+                        out CameraViewOutputTopology advanced, out string advancedIssue) &&
+                    advanced != null && advanced.BindingCount == 1,
+                    $"Advanced policy must author one distinct Output association. {advancedIssue}");
+                Require(!advanced.TryGetBinding(simple.OutputId, out _),
+                    "Advanced policy bound the simple Output.");
+                Require(advanced.TryGetBinding(viewB.ViewId, outputB.OutputId, out CameraViewOutputBinding policyBinding),
+                    "Advanced policy did not project the Secondary Output association.");
+
+                bool succeeded = CameraViewOutputTopology.TryCreate(
+                    new[] { simple, policyBinding },
+                    out CameraViewOutputTopology aggregate,
+                    out string diagnostic);
+                Require(succeeded && aggregate != null && aggregate.BindingCount == 2,
+                    $"Simple + advanced distinct Outputs must form a valid aggregate. diagnostic='{diagnostic}'.");
+                Require(
+                    aggregate.TryGetBinding(viewA.ViewId, outputA.OutputId, out _) &&
+                    aggregate.TryGetBinding(viewB.ViewId, outputB.OutputId, out _),
+                    "Aggregate topology did not retain exact simple and advanced associations.");
+                completed.Add("simple-advanced-distinct-outputs");
+            }
+            finally
+            {
+                for (int index = roots.Count - 1; index >= 0; index--)
+                    UnityEngine.Object.DestroyImmediate(roots[index]);
+                for (int index = definitions.Count - 1; index >= 0; index--)
+                    QaCameraAuthoringFixtures.Destroy(definitions[index]);
+            }
+        }
+
+        private static void VerifySimpleAdvancedSameOutputConflict(ICollection<string> completed)
+        {
+            var roots = new List<GameObject>();
+            var definitions = new List<ScriptableObject>();
+            try
+            {
+                CameraViewDefinition viewA = QaCameraAuthoringFixtures.CreateViewDefinition();
+                CameraViewDefinition viewB = QaCameraAuthoringFixtures.CreateViewDefinition();
+                CameraOutputDefinition output = QaCameraAuthoringFixtures.CreateOutputDefinition();
+                definitions.Add(viewA);
+                definitions.Add(viewB);
+                definitions.Add(output);
+
+                CameraSharedComposition composition = CreateComposition(
+                    roots, viewA, output, new CameraViewport(0f, 0f, 1f, 1f));
+                CameraViewOutputPolicyAuthoring policy = CreatePolicy(
+                    roots, viewB, output, new CameraViewport(0.5f, 0f, 0.5f, 1f));
+
+                Require(composition.TryCreateAssociationBinding(
+                        out CameraViewOutputBinding simple, out string simpleIssue),
+                    $"Simple association failed. {simpleIssue}");
+                Require(policy.TryBuildTopology(
+                        out CameraViewOutputTopology advanced, out string advancedIssue) &&
+                    advanced != null && advanced.BindingCount == 1,
+                    $"Advanced policy failed. {advancedIssue}");
+                Require(advanced.TryGetBinding(simple.OutputId, out CameraViewOutputBinding policyBinding),
+                    "Conflict case requires the advanced policy to target the same Output.");
+
+                bool succeeded = CameraViewOutputTopology.TryCreate(
+                    new[] { simple, policyBinding },
+                    out _,
+                    out string diagnostic);
+                Require(!succeeded,
+                    "Simple + advanced associations for the same Output must block.");
+                Require(!string.IsNullOrWhiteSpace(diagnostic) && diagnostic.IndexOf(
+                        "conflicting bindings", StringComparison.Ordinal) >= 0,
+                    $"Same-Output conflict did not report conflicting bindings. diagnostic='{diagnostic}'.");
+                completed.Add("simple-advanced-same-output-conflict");
+            }
+            finally
+            {
+                for (int index = roots.Count - 1; index >= 0; index--)
+                    UnityEngine.Object.DestroyImmediate(roots[index]);
+                for (int index = definitions.Count - 1; index >= 0; index--)
+                    QaCameraAuthoringFixtures.Destroy(definitions[index]);
+            }
+        }
+
+        private static CameraSharedComposition CreateComposition(
+            ICollection<GameObject> roots,
+            CameraViewDefinition view,
+            CameraOutputDefinition output,
+            CameraViewport viewport)
+        {
+            var root = new GameObject("QA_ADR027D_SimpleAssociation");
+            root.SetActive(false);
+            roots.Add(root);
+            CameraSharedComposition composition = root.AddComponent<CameraSharedComposition>();
+            composition.Configure(
+                view,
+                output,
+                CameraSharedCompositionSubjectPolicyKind.AllAvailableSubjects,
+                viewport);
+            return composition;
+        }
+
+        private static CameraViewOutputPolicyAuthoring CreatePolicy(
+            ICollection<GameObject> roots,
+            CameraViewDefinition view,
+            CameraOutputDefinition output,
+            CameraViewport viewport)
+        {
+            var root = new GameObject("QA_ADR027D_AdvancedPolicy");
+            root.SetActive(false);
+            roots.Add(root);
+            var binding = new CameraViewOutputBindingAuthoring();
+            binding.Configure(view, output, viewport);
+            CameraViewOutputPolicyAuthoring policy = root.AddComponent<CameraViewOutputPolicyAuthoring>();
+            policy.Configure(new[] { binding });
+            return policy;
+        }
+
         private static void Set(UnityEngine.Object target, string name, object value)
         {
             var serialized = new SerializedObject(target);
             serialized.Update();
             SerializedProperty property = serialized.FindProperty(name) ??
                 throw new InvalidOperationException($"Missing serialized property '{name}'.");
-            if (value is string text) property.stringValue = text;
-            else if (value is bool flag) property.boolValue = flag;
+            if (value is bool flag) property.boolValue = flag;
             else if (value is UnityEngine.Object reference) property.objectReferenceValue = reference;
             else throw new InvalidOperationException($"Unsupported value for '{name}'.");
             serialized.ApplyModifiedPropertiesWithoutUndo();

@@ -26,8 +26,6 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             "ImmersiveFrameworkQA.QA_CAMERA_BASELINE.PendingRestore";
         private const string PendingRestoreReasonKey =
             "ImmersiveFrameworkQA.QA_CAMERA_BASELINE.PendingRestoreReason";
-        private const string OutputAId = "camera.output.main";
-        private const string OutputBId = "camera.output.secondary";
 
         [InitializeOnLoadMethod]
         private static void Register()
@@ -160,10 +158,14 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                     $"for ADR-026 preparation. actual='{outputs.Count}' mode='{mode}'.");
             }
 
-            CameraOutputAuthoring outputA = RequireOutput(outputs, OutputAId);
-            CameraOutputAuthoring outputB = RequireOutput(outputs, OutputBId);
-            ValidateOutput(outputA, "A", OutputAId);
-            ValidateOutput(outputB, "B", OutputBId);
+            var definitionA = QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                QaCameraPersistentTopologyBuilder.OutputAPath);
+            var definitionB = QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                QaCameraPersistentTopologyBuilder.OutputBPath);
+            CameraOutputAuthoring outputA = RequireOutput(outputs, definitionA);
+            CameraOutputAuthoring outputB = RequireOutput(outputs, definitionB);
+            ValidateOutput(outputA, "A", definitionA);
+            ValidateOutput(outputB, "B", definitionB);
 
             if (ReferenceEquals(outputA.UnityCamera, outputB.UnityCamera) ||
                 ReferenceEquals(outputA.CinemachineBrain, outputB.CinemachineBrain) ||
@@ -175,44 +177,30 @@ namespace ImmersiveFrameworkQA.Camera.Editor
 
             List<CameraViewOutputPolicyAuthoring> policies =
                 FindInScene<CameraViewOutputPolicyAuthoring>(scene);
-            string topologyIssue = string.Empty;
-            CameraViewOutputTopology topology = null;
-            bool topologyValid = policies.Count == 1 &&
-                policies[0].TryBuildTopology(out topology, out topologyIssue) &&
-                topology != null &&
-                topology.BindingCount == 2;
-            if (!topologyValid)
+            if (policies.Count != 1)
             {
                 throw new InvalidOperationException(
-                    "Persisted QA_UIGlobal Camera View-to-Output topology is invalid. " +
-                    $"policies='{policies.Count}' mode='{mode}' issue='{topologyIssue ?? string.Empty}'.");
+                    "Persisted QA_UIGlobal requires exactly one advanced Camera View Output Policy. " +
+                    $"policies='{policies.Count}' mode='{mode}'.");
             }
 
-            if (mode == QaCameraAdr026TopologyMode.Shared)
-            {
-                CameraSharedComposition composition =
-                    outputA.GetComponent<CameraSharedComposition>();
-                if (composition == null)
-                {
-                    throw new InvalidOperationException(
-                        "Persisted canonical Shared Camera composition is missing from Output A.");
-                }
-
-                var serialized = new SerializedObject(composition);
-                serialized.Update();
-                SerializedProperty viewId = serialized.FindProperty("viewId");
-                SerializedProperty outputId = serialized.FindProperty("outputId");
-                SerializedProperty composer = serialized.FindProperty("composer");
-                if (viewId == null || outputId == null || composer == null ||
-                    viewId.stringValue != "camera.view.main" ||
-                    outputId.stringValue != OutputAId ||
-                    !ReferenceEquals(composer.objectReferenceValue, outputA.DefaultCameraRig))
-                {
-                    throw new InvalidOperationException(
-                        "Persisted canonical Shared Camera composition is not bound exactly " +
-                        "to View 'camera.view.main', Output A and Output A Default rig.");
-                }
-            }
+            CameraSharedComposition composition =
+                outputA.GetComponent<CameraSharedComposition>();
+            string viewAPath = mode == QaCameraAdr026TopologyMode.Shared
+                ? QaCameraPersistentTopologyBuilder.MainViewPath
+                : QaCameraPersistentTopologyBuilder.SplitAViewPath;
+            string viewBPath = mode == QaCameraAdr026TopologyMode.Shared
+                ? QaCameraPersistentTopologyBuilder.SecondaryViewPath
+                : QaCameraPersistentTopologyBuilder.SplitBViewPath;
+            QaCameraPersistentTopologyBuilder.ValidateAggregateAuthoredTopology(
+                composition,
+                policies[0],
+                outputA,
+                outputB,
+                QaCameraPersistentTopologyBuilder.RequireDefinition<CameraViewDefinition>(viewAPath),
+                QaCameraPersistentTopologyBuilder.RequireDefinition<CameraViewDefinition>(viewBPath),
+                QaCameraPersistentTopologyBuilder.SimpleViewport(mode),
+                QaCameraPersistentTopologyBuilder.AdvancedViewport(mode));
 
             // Capture persisted evidence before opening the Hub. OpenSceneMode.Single destroys
             // all objects from QA_UIGlobal, so retaining CameraOutputAuthoring/Camera references
@@ -231,13 +219,13 @@ namespace ImmersiveFrameworkQA.Camera.Editor
 
         private static CameraOutputAuthoring RequireOutput(
             List<CameraOutputAuthoring> outputs,
-            string outputId)
+            CameraOutputDefinition definition)
         {
             CameraOutputAuthoring match = null;
             for (int index = 0; index < outputs.Count; index++)
             {
                 CameraOutputAuthoring candidate = outputs[index];
-                if (candidate == null || candidate.OutputIdText != outputId)
+                if (candidate == null || !ReferenceEquals(candidate.OutputDefinition, definition))
                 {
                     continue;
                 }
@@ -245,28 +233,28 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 if (match != null)
                 {
                     throw new InvalidOperationException(
-                        $"Persisted QA_UIGlobal contains duplicate Camera Output Id '{outputId}'.");
+                        $"Persisted QA_UIGlobal contains duplicate Camera Output definition '{definition.name}'.");
                 }
 
                 match = candidate;
             }
 
             return match ?? throw new InvalidOperationException(
-                $"Persisted QA_UIGlobal is missing Camera Output Id '{outputId}'.");
+                $"Persisted QA_UIGlobal is missing Camera Output definition '{definition.name}'.");
         }
 
         private static void ValidateOutput(
             CameraOutputAuthoring output,
             string label,
-            string expectedOutputId)
+            CameraOutputDefinition expectedDefinition)
         {
-            if (output.OutputIdText != expectedOutputId ||
+            if (!ReferenceEquals(output.OutputDefinition, expectedDefinition) ||
                 output.UnityCamera == null ||
                 output.CinemachineBrain == null ||
                 output.DefaultCameraRig == null)
             {
                 throw new InvalidOperationException(
-                    $"Persisted Camera Output {label} ('{expectedOutputId}') is incomplete. " +
+                    $"Persisted Camera Output {label} ('{expectedDefinition.name}') is incomplete. " +
                     $"camera='{(output.UnityCamera != null)}' " +
                     $"brain='{(output.CinemachineBrain != null)}' " +
                     $"defaultRig='{(output.DefaultCameraRig != null)}'.");
@@ -279,6 +267,18 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 throw new InvalidOperationException(
                     $"Persisted Camera Output {label} Camera and CinemachineBrain are not " +
                     "owned by the same GameObject.");
+            }
+
+            if (output.DefaultCameraRig.BehaviorDefinition == null)
+            {
+                throw new InvalidOperationException(
+                    $"Persisted Camera Output {label} Default Camera Rig requires a Camera Rig Behavior Definition.");
+            }
+
+            if (!output.DefaultCameraRig.BehaviorDefinition.TryValidate(out string behaviorIssue))
+            {
+                throw new InvalidOperationException(
+                    $"Persisted Camera Output {label} Default Camera Rig Behavior Definition is invalid. {behaviorIssue}");
             }
         }
 

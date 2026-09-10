@@ -741,6 +741,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             private readonly GameObject root;
             private readonly Transform target;
             private readonly CameraOutputAuthoring binding;
+            private readonly CameraOutputDefinition outputDefinition;
 
             public SyntheticFixture(string caseId)
             {
@@ -753,7 +754,8 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 CinemachineBrain brain = root.AddComponent<CinemachineBrain>();
 
                 binding = root.AddComponent<CameraOutputAuthoring>();
-                Set(binding, "outputId", $"qa.camera.adr004b.{caseId}.output");
+                outputDefinition = QaCameraAuthoringFixtures.CreateOutputDefinition();
+                Set(binding, "outputDefinition", outputDefinition);
                 Set(binding, "unityCamera", unityCamera);
                 Set(binding, "cinemachineBrain", brain);
                 Set(binding, "initializeOnAwake", false);
@@ -830,10 +832,10 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                         new CameraOutputId(outputId ?? OutputId),
                         new CameraRequestOwner(
                             CameraRequestOwnerKind.Session,
-                            $"qa.camera.adr004b.owner.{requestId}"),
+                            new CameraRequestOwnerScopeId($"qa.camera.adr004b.owner.{requestId}")),
                         new CameraRequestLifetime(
                             CameraRequestLifetimeKind.Session,
-                            $"qa.camera.adr004b.scope.{requestId}"),
+                            new CameraRequestLifetimeScopeId($"qa.camera.adr004b.scope.{requestId}")),
                         CameraRigReference.FromComposer(composer),
                         CameraTargetSourceDescriptor.ExplicitTransform(
                             target,
@@ -922,6 +924,8 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 {
                     UnityEngine.Object.DestroyImmediate(root);
                 }
+
+                QaCameraAuthoringFixtures.Destroy(outputDefinition);
             }
 
             private static void Set(

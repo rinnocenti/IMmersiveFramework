@@ -35,7 +35,11 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private const string HubRoutePath =
             Root + "/Hub/Routes/QA_HubRoute.asset";
         private const string ReplacementActorProfilePath =
-            Root + "/Player/Profiles/QA_AlternateActor.asset";
+            CameraRoot + "/Profiles/QA_SharedCameraReplacementActor.asset";
+        private const string ReplacementPresentationPath =
+            CameraRoot + "/Prefabs/QA_SharedCameraReplacementPresentation.prefab";
+        private const string ReplacementActorProfileId =
+            "actor-profile.qa.camera.shared-replacement";
         private const string HubDomain = "Camera";
         private const string HubLabel = "Camera Override Authority";
         private const string HubTriggerName =
@@ -53,6 +57,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
 
         private static void RepairAssets()
         {
+            RepairReplacementActor();
             ActivityAsset activity = LoadOrCreate<ActivityAsset>(ActivityPath);
             Set(activity, "activityName",
                 "QA C9R Camera Override Authority Activity");
@@ -92,6 +97,62 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             }
         }
 
+        private static void RepairReplacementActor()
+        {
+            if (!AssetDatabase.IsValidFolder(CameraRoot + "/Profiles"))
+                AssetDatabase.CreateFolder(CameraRoot, "Profiles");
+            if (!AssetDatabase.IsValidFolder(CameraRoot + "/Prefabs"))
+                AssetDatabase.CreateFolder(CameraRoot, "Prefabs");
+
+            var staging = new GameObject("QA_SharedCameraReplacementPresentation");
+            try
+            {
+                staging.AddComponent<PlayerGameplayInputReader>();
+                var observation = new GameObject("Camera Subject");
+                observation.transform.SetParent(staging.transform, false);
+                observation.transform.localPosition = new Vector3(0f, 1.6f, 0f);
+                ActorCameraSubjectAuthoring subject =
+                    staging.AddComponent<ActorCameraSubjectAuthoring>();
+                Set(subject, "observationTransform", observation.transform);
+
+                GameObject visual = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+                visual.name = "Visual";
+                visual.transform.SetParent(staging.transform, false);
+                visual.transform.localScale = new Vector3(0.6f, 0.6f, 0.6f);
+                UnityEngine.Object.DestroyImmediate(visual.GetComponent<Collider>());
+                if (PrefabUtility.SaveAsPrefabAsset(staging, ReplacementPresentationPath) == null)
+                    throw new InvalidOperationException(
+                        "ADR-026 replacement Presentation could not be saved.");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(staging);
+            }
+
+            GameObject presentation = Require<GameObject>(ReplacementPresentationPath);
+            ActorProfile profile = LoadOrCreate<ActorProfile>(ReplacementActorProfilePath);
+            profile.name = "QA_SharedCameraReplacementActor";
+            Set(profile, "actorProfileId", ReplacementActorProfileId);
+            Set(profile, "displayName", "QA Shared Camera Replacement Actor");
+            Set(profile, "description", "Dedicated ADR-026 replacement Actor, independent of Player Slot defaults.");
+            Set(profile, "actorKind", (int)ActorKind.Player);
+            Set(profile, "actorRole", (int)ActorRole.Protagonist);
+            Set(profile, "presentationPrefab", presentation);
+            AssetDatabase.SaveAssetIfDirty(profile);
+
+            ActorCameraSubjectAuthoring[] subjects =
+                presentation.GetComponentsInChildren<ActorCameraSubjectAuthoring>(true);
+            if (profile.ActorProfileId != ActorProfileId.From(ReplacementActorProfileId) ||
+                presentation.GetComponentsInChildren<PlayerGameplayInputReader>(true).Length != 1 ||
+                subjects.Length != 1 || subjects[0].transform != presentation.transform ||
+                !subjects[0].TryResolveObservation(presentation.transform, out Transform resolved, out _) ||
+                resolved == presentation.transform || !resolved.IsChildOf(presentation.transform))
+            {
+                throw new InvalidOperationException(
+                    "ADR-026 replacement fixture requires its own Actor identity, one gameplay reader and one explicit child Camera Subject.");
+            }
+        }
+
         private static void RepairScene(QaCameraAdr026TopologyMode mode)
         {
             Scene scene = AssetDatabase.LoadAssetAtPath<SceneAsset>(ScenePath) != null
@@ -121,17 +182,11 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             CameraRigComposer routeRig = Composer(
                 scene,
                 "QA_C9R_RouteRig",
-                "Route Cinemachine Camera",
-                routeTarget,
-                routeTarget,
-                "qa.c9r.route-target");
+                "Route Cinemachine Camera");
             CameraRigComposer activityRig = Composer(
                 scene,
                 "QA_C9R_ActivityRig",
-                "Activity Cinemachine Camera",
-                activityTarget,
-                activityTarget,
-                "qa.c9r.activity-target");
+                "Activity Cinemachine Camera");
 
             GameObject routeRoot = RootObject(
                 scene,
@@ -161,6 +216,12 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             GameObject activityRoot = Child(
                 routeRoot.transform,
                 "QA_C9R_ActivityContent");
+            ActivityContentContribution activityContent =
+                Component<ActivityContentContribution>(activityRoot);
+            Set(activityContent, "activity", activity);
+            Set(activityContent, "localContentId", "qa.c9r.activity-content");
+            Set(activityContent, "requiredness",
+                (int)FrameworkContentRequiredness.Required);
             ActivityVisibilityRule adapter =
                 Component<ActivityVisibilityRule>(activityRoot);
             Set(adapter, "activities",
@@ -212,15 +273,18 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             QaCameraOutputProbe outputAProbe = OutputProbe(
                 controls.transform,
                 "QA_ADR026_OutputA_Probe",
-                "camera.output.main");
+                QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                    QaCameraPersistentTopologyBuilder.OutputAPath));
             QaCameraOutputProbe outputBProbe = OutputProbe(
                 controls.transform,
                 "QA_ADR026_OutputB_Probe",
-                "camera.output.secondary");
+                QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                    QaCameraPersistentTopologyBuilder.OutputBPath));
             QaCameraOutputProbe missingOutputProbe = OutputProbe(
                 controls.transform,
                 "QA_ADR026_MissingOutput_Probe",
-                "camera.output.missing");
+                QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                    QaCameraPersistentTopologyBuilder.MissingOutputPath));
 
             Set(fixture, "topologyMode", (int)mode);
             Set(fixture, "routeBinding", routeBinding);
@@ -241,6 +305,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 route,
                 activity,
                 routeContent,
+                activityContent,
                 adapter,
                 routeBinding,
                 activityBinding,
@@ -260,34 +325,20 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private static CameraRigComposer Composer(
             Scene scene,
             string rootName,
-            string cameraName,
-            Transform followTarget,
-            Transform lookAtTarget,
-            string logicalSourceId)
+            string cameraName)
         {
             GameObject root = RootObject(scene, rootName);
-            ExplicitCameraTargetSourceAuthoring source =
-                Component<ExplicitCameraTargetSourceAuthoring>(root);
-            Set(source, "logicalSourceId", logicalSourceId);
-            Set(source, "followTarget", followTarget);
-            Set(source, "lookAtTarget", lookAtTarget);
-
             CameraRigComposer composer = Component<CameraRigComposer>(root);
             CinemachineCamera camera = Component<CinemachineCamera>(
                 Child(root.transform, cameraName));
             camera.enabled = false;
 
-            Set(composer, "presentationIntent",
-                (int)CameraRigPresentationIntent.Follow);
-            Set(composer, "targetSourceKind",
-                (int)CameraTargetSourceKind.ExplicitTransform);
-            Set(composer, "targetSource", source);
-            Set(composer, "followRequirement",
-                (int)CameraTargetRequirement.Required);
-            Set(composer, "lookAtRequirement",
-                (int)CameraTargetRequirement.Optional);
-            Set(composer, "cinemachineCamera", camera);
-            Set(composer, "logApplyRebuildDiagnostics", false);
+            QaCameraPersistentTopologyBuilder.AssignComposerBeforeApplyRebuild(
+                composer,
+                QaCameraPersistentTopologyBuilder.RequireBehavior<FollowCameraRigBehaviorDefinition>(
+                    QaCameraPersistentTopologyBuilder.FollowBehaviorPath),
+                camera,
+                rootName);
 
             CameraRigComposerApplyRebuildResult result =
                 CameraRigComposerApplyRebuildUtility.ApplyOrRebuild(
@@ -315,7 +366,9 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             int precedence,
             string tieBreaker)
         {
-            Set(binding, "outputId", "camera.output.main");
+            Set(binding, "outputDefinition",
+                QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                    QaCameraPersistentTopologyBuilder.OutputAPath));
             Set(binding, ownerProperty, owner);
             Set(binding, "scopeId", scope);
             Set(binding, "requestId", request);
@@ -473,6 +526,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             RouteAsset route,
             ActivityAsset activity,
             RouteContentContribution routeContent,
+            ActivityContentContribution activityContent,
             ActivityVisibilityRule visibility,
             RouteCameraOverride routeBinding,
             ActivityCameraOverride activityBinding,
@@ -483,6 +537,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             QaCameraOutputProbe missingOutputProbe)
         {
             if (!ReferenceEquals(Single<RouteContentContribution>(scene), routeContent) ||
+                !ReferenceEquals(Single<ActivityContentContribution>(scene), activityContent) ||
                 !ReferenceEquals(Single<ActivityVisibilityRule>(scene), visibility) ||
                 !ReferenceEquals(Single<RouteCameraOverride>(scene), routeBinding) ||
                 !ReferenceEquals(Single<ActivityCameraOverride>(scene), activityBinding) ||
@@ -499,6 +554,20 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             {
                 throw new InvalidOperationException(
                     "C9R Route content binding is not materialized with the canonical owner, local id and requiredness.");
+            }
+
+            if (!ReferenceEquals(activityContent.Activity, activity) ||
+                !activity.HasValidActivityId ||
+                !ReferenceEquals(activityContent.Activity, activityBinding.AssignedActivity) ||
+                activityContent.gameObject != activityBinding.gameObject ||
+                activityContent.gameObject != visibility.gameObject ||
+                activityContent.transform.parent != routeContent.transform ||
+                !activityContent.TryGetLocalContentId(out _) ||
+                activityContent.LocalContentIdText != "qa.c9r.activity-content" ||
+                activityContent.Requiredness != FrameworkContentRequiredness.Required)
+            {
+                throw new InvalidOperationException(
+                    "C9R Activity content boundary must contain its Camera override and visibility rule under Route content, with the canonical Activity, explicit local id and Required contribution.");
             }
 
             if (visibility.Activities.Count != 1 ||
@@ -519,9 +588,18 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             }
 
             if (playerObserver.Scope != LocalPlayerProvisioningConsumerScope.Route ||
-                outputAProbe.OutputIdText != "camera.output.main" ||
-                outputBProbe.OutputIdText != "camera.output.secondary" ||
-                missingOutputProbe.OutputIdText != "camera.output.missing" ||
+                !ReferenceEquals(
+                    outputAProbe.OutputDefinition,
+                    QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                        QaCameraPersistentTopologyBuilder.OutputAPath)) ||
+                !ReferenceEquals(
+                    outputBProbe.OutputDefinition,
+                    QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                        QaCameraPersistentTopologyBuilder.OutputBPath)) ||
+                !ReferenceEquals(
+                    missingOutputProbe.OutputDefinition,
+                    QaCameraPersistentTopologyBuilder.RequireDefinition<CameraOutputDefinition>(
+                        QaCameraPersistentTopologyBuilder.MissingOutputPath)) ||
                 All<QaCameraOutputProbe>(scene).Count != 3)
             {
                 throw new InvalidOperationException(
@@ -541,11 +619,11 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private static QaCameraOutputProbe OutputProbe(
             Transform parent,
             string name,
-            string outputId)
+            CameraOutputDefinition outputDefinition)
         {
             QaCameraOutputProbe probe =
                 Component<QaCameraOutputProbe>(Child(parent, name));
-            Set(probe, "outputId", outputId);
+            Set(probe, "outputDefinition", outputDefinition);
             Set(probe, "output", null);
             Set(probe, "lastDetachReason", string.Empty);
             Set(probe, "attachmentCount", 0);

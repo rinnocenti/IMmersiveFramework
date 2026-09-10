@@ -178,6 +178,36 @@ namespace ImmersiveFrameworkQA.Camera
             }
         }
 
+        private void RequireReplacementActorPreconditions(
+            PlayerSessionScopedObservationSnapshot initial)
+        {
+            Require(replacementActorProfile != null,
+                "ADR-026 Actor replacement proof requires an explicit replacement Actor Profile.");
+            Require(replacementActorProfile.TryGetActorProfileId(
+                    out ActorProfileId replacementId, out string replacementIssue),
+                $"ADR-026 replacement Actor identity is invalid. {replacementIssue}");
+            Require(initial.HasInitializationEvidence &&
+                    initial.InitializationConfiguration.SupportedSlotCount >= 2,
+                "ADR-026 Shared Camera requires captured default Actor configuration for at least two Slots.");
+            Require(initial.Participation.ActorSelectionDuplicatePolicy ==
+                    PlayerActorSelectionDuplicatePolicy.UniqueAcrossJoinedSlots,
+                "ADR-026 Shared Camera requires the canonical UniqueAcrossJoinedSlots policy.");
+
+            foreach (EffectivePlayerSlotProvisioning slot in
+                     initial.InitializationConfiguration.Slots)
+            {
+                Require(slot.DefaultActorProfile != null,
+                    $"ADR-026 Shared Camera requires a configured default Actor. slot='{slot.PlayerSlotId.StableText}'.");
+                Require(slot.DefaultActorProfile.TryGetActorProfileId(
+                        out ActorProfileId defaultId, out string defaultIssue),
+                    $"ADR-026 configured default Actor identity is invalid. slot='{slot.PlayerSlotId.StableText}' issue='{defaultIssue}'.");
+                Require(replacementId != defaultId,
+                    "ADR-026 Shared Camera replacement Actor conflicts with a Slot configured default Actor under UniqueAcrossJoinedSlots. " +
+                    $"replacementActor='{replacementId.StableText}' conflictingSlot='{slot.PlayerSlotId.StableText}' " +
+                    $"configuredActor='{defaultId.StableText}'.");
+            }
+        }
+
         private IEnumerator RunSharedCameraProofCore()
         {
             IPlayerSessionScopedAccess access = null;
@@ -208,6 +238,7 @@ namespace ImmersiveFrameworkQA.Camera
                 Require(SubjectSnapshot().Count == 0,
                     "Fresh Shared Camera phase contains unexpected Camera Subjects.");
                 RequireNoOrdinaryPlayerRequests("shared-baseline");
+                RequireReplacementActorPreconditions(initial);
 
                 p1Keyboard = InputSystem.AddDevice<Keyboard>();
                 p2Keyboard = InputSystem.AddDevice<Keyboard>();
@@ -255,14 +286,14 @@ namespace ImmersiveFrameworkQA.Camera
                 CameraSubjectAvailabilityEntry p1AEntry =
                     RequireSubjectForHost(SubjectSnapshot(), p1A.LocalPlayerHost, "P1-A");
                 RequireExplicitChildSubject(p1AEntry, p1A.LocalPlayerHost, "P1-A");
-                CameraRigComposer composer = SharedComposition.Composer;
+                CameraRigComposer composer = SharedComposition.Output.DefaultCameraRig;
                 CinemachineCamera cinemachine = composer.CinemachineCamera;
                 CameraOutputAuthoring output = SharedComposition.Output;
                 CameraViewId view = SharedComposition.ViewId;
                 RequireSharedIdentity(view, composer, cinemachine, output, "p1-join");
 
                 mountedAssignments = new CameraViewAssignmentContext(
-                    "qa.camera.adr026.mounted-assignments",
+                    new ViewAssignmentContextId("qa.camera.adr026.mounted-assignments"),
                     SubjectSnapshot().ContextId,
                     new CameraView(
                         mountedViewId,
@@ -274,8 +305,6 @@ namespace ImmersiveFrameworkQA.Camera
                     p1AEntry,
                     "p1-a-join");
 
-                Require(replacementActorProfile != null,
-                    "ADR-026 Actor replacement proof requires an explicit replacement Actor Profile.");
                 CameraSubjectId p1AOldSubjectId = p1AEntry.Subject.SubjectId;
                 Transform p1AOldObservation = p1AEntry.Subject.Observation;
                 PlayerPreparedActorReplacementResult replacement =
@@ -464,8 +493,9 @@ namespace ImmersiveFrameworkQA.Camera
             {
                 Require(OutputA != null && OutputB != null,
                     "Split proof requires both exact injected Outputs.");
-                Require(OutputA.OutputIdText == "camera.output.main" &&
-                        OutputB.OutputIdText == "camera.output.secondary" &&
+                Require(OutputA.OutputDefinition != null && OutputA.OutputDefinition.HasValidId &&
+                        OutputB.OutputDefinition != null && OutputB.OutputDefinition.HasValidId &&
+                        !ReferenceEquals(OutputA.OutputDefinition, OutputB.OutputDefinition) &&
                         OutputA.OutputIdText != OutputB.OutputIdText,
                     "Split proof requires exact distinct CameraOutputId values.");
                 Require(!ReferenceEquals(OutputA.UnityCamera, OutputB.UnityCamera) &&
@@ -510,7 +540,7 @@ namespace ImmersiveFrameworkQA.Camera
                 Adr026SplitExecuted = true;
                 Adr026SplitPassed = true;
                 Adr026SplitDiagnostic =
-                    "outputs='camera.output.main,camera.output.secondary' viewports='left,right' isolation='Passed' missingOutput='Rejected' automaticSplitScreen='RejectedByAuthoringValidation'.";
+                    $"outputs='{OutputA.OutputIdText},{OutputB.OutputIdText}' viewports='left,right' isolation='Passed' missingOutput='Rejected' automaticSplitScreen='RejectedByAuthoringValidation'.";
                 Debug.Log($"{Adr026Prefix} phase='split' status='Passed' {Adr026SplitDiagnostic}", this);
             }
             catch (Exception exception)
@@ -720,9 +750,9 @@ namespace ImmersiveFrameworkQA.Camera
                 new CameraRequestId(RouteLifecycleSurvivorRequestId),
                 new CameraOutputId(OutputA.OutputIdText),
                 new CameraRequestOwner(CameraRequestOwnerKind.Session,
-                    "qa.camera.adr004b.route-lifecycle-survivor-owner"),
+                    new CameraRequestOwnerScopeId("qa.camera.adr004b.route-lifecycle-survivor-owner")),
                 new CameraRequestLifetime(CameraRequestLifetimeKind.Session,
-                    "qa.camera.adr004b.route-lifecycle-survivor-scope"),
+                    new CameraRequestLifetimeScopeId("qa.camera.adr004b.route-lifecycle-survivor-scope")),
                 CameraRigReference.FromComposer(SessionOverride.RigComposer),
                 CameraTargetSourceDescriptor.ExplicitTransform(
                     SessionOverride.TargetSource, "ADR004BRouteLifecycleSurvivor"),
@@ -741,14 +771,22 @@ namespace ImmersiveFrameworkQA.Camera
 
         private ICameraRequestPublisher CreateSplitOutputPublisher()
         {
-            Transform target = routeComposer != null ? routeComposer.ExplicitFollowTarget : null;
-            Require(target != null, "Split Output B request requires an explicit target.");
+            Require(OutputB != null, "Split Output B request requires Output B to be injected.");
+            Require(OutputB.IsInitialized, "Split Output B request requires Output B to be initialized.");
+            CameraRigComposer outputBRig = OutputB.DefaultCameraRig;
+            Require(outputBRig != null,
+                "Split Output B request requires Output B to own a DefaultCameraRig.");
+            Transform target = OutputB.transform;
+            Require(target != null,
+                "Split Output B request requires its Output Transform as request source evidence.");
             CameraRequestCreateResult request = CameraRequestCreateResult.Create(
                 new CameraRequestId("qa.camera.adr026.output-b.request"),
                 new CameraOutputId(OutputB.OutputIdText),
-                new CameraRequestOwner(CameraRequestOwnerKind.Session, "qa.camera.adr026.output-b.owner"),
-                new CameraRequestLifetime(CameraRequestLifetimeKind.Session, "qa.camera.adr026.output-b.scope"),
-                CameraRigReference.FromComposer(OutputB.DefaultCameraRig),
+                new CameraRequestOwner(CameraRequestOwnerKind.Session,
+                    new CameraRequestOwnerScopeId("qa.camera.adr026.output-b.owner")),
+                new CameraRequestLifetime(CameraRequestLifetimeKind.Session,
+                    new CameraRequestLifetimeScopeId("qa.camera.adr026.output-b.scope")),
+                CameraRigReference.FromComposer(outputBRig),
                 CameraTargetSourceDescriptor.ExplicitTransform(target, "ADR026OutputB"),
                 new CameraRequestPolicy(250, "adr026-output-b"),
                 CameraRequestReleaseCondition.ExplicitRelease,
@@ -1005,7 +1043,7 @@ namespace ImmersiveFrameworkQA.Camera
             string phase)
         {
             Require(SharedComposition.ViewId == view &&
-                    ReferenceEquals(SharedComposition.Composer, composer) &&
+                    ReferenceEquals(SharedComposition.Output.DefaultCameraRig, composer) &&
                     ReferenceEquals(composer.CinemachineCamera, cinemachine) &&
                     ReferenceEquals(SharedComposition.Output, output) && ReferenceEquals(output, OutputA),
                 $"Shared Camera changed View, Composer, Cinemachine Camera or Output at '{phase}'.");

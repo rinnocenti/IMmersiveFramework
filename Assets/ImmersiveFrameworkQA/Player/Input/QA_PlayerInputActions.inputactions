@@ -4,12 +4,12 @@
     "maps": [
         {
             "name": "Gameplay",
-            "id": "705a6c45-028c-4df1-a19e-d7d323327438",
+            "id": "bcee0f6b-a492-4561-b082-ce39bc0f8425",
             "actions": [
                 {
                     "name": "Activate",
                     "type": "Button",
-                    "id": "808943c7-7982-403e-a13a-20371cad5a10",
+                    "id": "c82b9a01-a2d2-48eb-a841-fd115237d025",
                     "expectedControlType": "",
                     "processors": "",
                     "interactions": "",
@@ -19,7 +19,7 @@
             "bindings": [
                 {
                     "name": "",
-                    "id": "7c710e7e-b190-4acf-bcb3-20de8cf438b1",
+                    "id": "a3359840-1c37-4c11-8044-df77b280076d",
                     "path": "<Keyboard>/space",
                     "interactions": "",
                     "processors": "",
@@ -32,12 +32,12 @@
         },
         {
             "name": "Global",
-            "id": "a65b0ebc-8131-4d45-b3b8-f0dac1a7876e",
+            "id": "6fe53cf4-dd8d-43d9-b710-69b5807709f7",
             "actions": [
                 {
                     "name": "Pause",
                     "type": "Button",
-                    "id": "525973a6-9a50-4997-afa6-fd3a76c28bf5",
+                    "id": "7a7f7447-0c2d-420b-92d8-44bf38fabadf",
                     "expectedControlType": "",
                     "processors": "",
                     "interactions": "",
@@ -47,7 +47,7 @@
             "bindings": [
                 {
                     "name": "",
-                    "id": "b6a342bd-e47d-46fb-b585-6a6c63d8e3e1",
+                    "id": "d3de90e3-2654-42bc-8820-821cfc95f028",
                     "path": "<Keyboard>/escape",
                     "interactions": "",
                     "processors": "",

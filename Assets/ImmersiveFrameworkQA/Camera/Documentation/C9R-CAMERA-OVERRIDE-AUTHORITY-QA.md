@@ -38,8 +38,9 @@ manager or parallel orchestration path.
 
 ## ADR-026 Shared phase
 
-The persistent composition authors two distinct Outputs but binds the shared View
-to Output A in fullscreen. The fixture proves:
+The persistent composition authors two distinct Outputs. Shared Camera Composition
+binds Main View to Output A fullscreen. The advanced Policy binds only Secondary
+View to Output B fullscreen. The fixture proves:
 
 - P1 join creates one live subject and target-group member;
 - P2 join creates the second member;
@@ -51,10 +52,12 @@ to Output A in fullscreen. The fixture proves:
 
 ## ADR-026 Split/Multi-Output phase
 
-The second fresh boot binds two Views to two distinct Outputs with left/right
-viewports. It proves distinct Camera/Brain/default-rig materialization, exact
-binding cardinality, missing-output rejection, independent request arbitration and
-restoration to each Output's own Default rig.
+The second fresh boot uses CAMERA-027-D coexistence: Shared Camera Composition
+binds Split A View to Output A on the left half, and the advanced Policy binds
+only Split B View to Output B on the right half. It proves distinct
+Camera/Brain/default-rig materialization, exact binding cardinality, missing-output
+rejection, independent request arbitration and restoration to each Output's own
+Default rig.
 
 ## Setup and execution
 
@@ -64,9 +67,11 @@ Immersive Framework > QA > Setup > Camera > Prepare ADR-026 Split Phase
 Immersive Framework > QA > Camera > Run Full Camera QA
 ```
 
-The full runner also executes ADR-022, generic Activity/Route/Session authority,
-ADR-004B negative integrity and ADR-004C owner lifetime. It changes topology only
-in Edit Mode and enters a fresh Play Mode session for each ADR-026 phase.
+The full runner executes ADR-026 Shared and Split topology, generic
+Activity/Route/Session authority, ADR-004B negative integrity and ADR-004C owner
+lifetime. Camera Rig Behavior Definitions and View/Output definitions are the
+normal authoring authority. It changes topology only in Edit Mode and enters a
+fresh Play Mode session for each ADR-026 phase.
 
 Expected terminal evidence is causal and machine-readable:
 

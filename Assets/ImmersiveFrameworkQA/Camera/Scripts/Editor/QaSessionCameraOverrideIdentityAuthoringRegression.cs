@@ -18,7 +18,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             "Immersive Framework/QA/Regressions/Camera/Run Session Camera Override Identity Authoring Regression";
 
         private const string EditorTypeName =
-            "Immersive.Framework.Editor.CameraAuthoring.SessionCameraOverrideEditor";
+            "Immersive.Framework.Editor.Camera.Bindings.SessionCameraOverrideEditor";
 
         private const BindingFlags InstanceAny =
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;

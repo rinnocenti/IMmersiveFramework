@@ -1,4 +1,5 @@
 using Immersive.Framework.Camera;
+using Immersive.Framework.CameraAuthoring;
 using UnityEngine;
 
 namespace ImmersiveFrameworkQA.Camera
@@ -12,13 +13,17 @@ namespace ImmersiveFrameworkQA.Camera
         MonoBehaviour,
         ICameraOutputSessionConsumer
     {
-        [SerializeField] private string outputId;
+        [SerializeField] private CameraOutputDefinition outputDefinition;
         [SerializeField] private CameraOutputAuthoring output;
         [SerializeField] private string lastDetachReason;
         [SerializeField] private int attachmentCount;
 
+        public CameraOutputDefinition OutputDefinition => outputDefinition;
+
         public string OutputIdText =>
-            string.IsNullOrWhiteSpace(outputId) ? string.Empty : outputId.Trim();
+            outputDefinition != null && outputDefinition.HasValidId
+                ? outputDefinition.OutputId.Value
+                : string.Empty;
 
         public CameraOutputId RequestedOutputId =>
             new CameraOutputId(OutputIdText);

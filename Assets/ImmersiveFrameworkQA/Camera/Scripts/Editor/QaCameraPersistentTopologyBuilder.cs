@@ -26,8 +26,65 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private const string OutputBRootName = "QA ADR026 Camera Output B";
         private const string PolicyRootName = "QA ADR026 Camera View Output Policy";
         private const string LegacyOutputRootName = "QA C9R Session Camera Output";
-        private const string OutputAId = "camera.output.main";
-        private const string OutputBId = "camera.output.secondary";
+        internal const string OutputAPath = DefinitionFolder + "/MainOutput.asset";
+        internal const string OutputBPath = DefinitionFolder + "/SecondaryOutput.asset";
+        internal const string MissingOutputPath = DefinitionFolder + "/MissingOutput.asset";
+        internal const string MainViewPath = DefinitionFolder + "/MainView.asset";
+        internal const string SecondaryViewPath = DefinitionFolder + "/SecondaryView.asset";
+        internal const string SplitAViewPath = DefinitionFolder + "/SplitAView.asset";
+        internal const string SplitBViewPath = DefinitionFolder + "/SplitBView.asset";
+        internal const string FollowBehaviorPath = DefinitionFolder + "/FollowBehavior.asset";
+        internal const string MountedBehaviorPath = DefinitionFolder + "/MountedBehavior.asset";
+        private const string DefinitionFolder = "Assets/ImmersiveFrameworkQA/Camera/Definitions";
+
+        internal static CameraViewport SharedSimpleViewport => new CameraViewport(0f, 0f, 1f, 1f);
+        internal static CameraViewport SharedAdvancedViewport => new CameraViewport(0f, 0f, 1f, 1f);
+        internal static CameraViewport SplitSimpleViewport => new CameraViewport(0f, 0f, 0.5f, 1f);
+        internal static CameraViewport SplitAdvancedViewport => new CameraViewport(0.5f, 0f, 0.5f, 1f);
+
+        internal static T RequireDefinition<T>(string path) where T : ScriptableObject
+        {
+            var definition = AssetDatabase.LoadAssetAtPath<T>(path);
+            if (definition == null)
+                throw new InvalidOperationException($"Required Camera definition is missing at '{path}'. Run Camera setup.");
+            string issue = CameraDefinitionIdentityEditorUtility.Validate(definition);
+            if (!string.IsNullOrEmpty(issue))
+                throw new InvalidOperationException($"Camera definition '{path}' is invalid. {issue}");
+            return definition;
+        }
+
+        private static T CreateDefinitionIfMissing<T>(string path) where T : ScriptableObject
+        {
+            if (AssetDatabase.LoadMainAssetAtPath(path) == null)
+            {
+                var definition = ScriptableObject.CreateInstance<T>();
+                CameraDefinitionIdentityEditorUtility.GenerateMissingId(definition);
+                AssetDatabase.CreateAsset(definition, path);
+            }
+            return RequireDefinition<T>(path);
+        }
+
+        internal static T RequireBehavior<T>(string path) where T : CameraRigBehaviorDefinition
+        {
+            var definition = AssetDatabase.LoadAssetAtPath<T>(path);
+            if (definition == null)
+                throw new InvalidOperationException(
+                    $"Required Camera Rig Behavior definition is missing at '{path}'. Run Camera setup.");
+            if (!definition.TryValidate(out string issue))
+                throw new InvalidOperationException(
+                    $"Camera Rig Behavior definition '{path}' is invalid. {issue}");
+            return definition;
+        }
+
+        private static T CreateBehaviorIfMissing<T>(string path) where T : CameraRigBehaviorDefinition
+        {
+            if (AssetDatabase.LoadMainAssetAtPath(path) == null)
+            {
+                var definition = ScriptableObject.CreateInstance<T>();
+                AssetDatabase.CreateAsset(definition, path);
+            }
+            return RequireBehavior<T>(path);
+        }
 
         internal static void Build(QaCameraAdr026TopologyMode mode)
         {
@@ -35,25 +92,49 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 throw new InvalidOperationException(
                     "ADR-026 persistent Camera topology can only be rebuilt in Edit Mode.");
 
+            if (!AssetDatabase.IsValidFolder(DefinitionFolder))
+                AssetDatabase.CreateFolder("Assets/ImmersiveFrameworkQA/Camera", "Definitions");
+            CreateDefinitionIfMissing<CameraOutputDefinition>(OutputAPath);
+            CreateDefinitionIfMissing<CameraOutputDefinition>(OutputBPath);
+            CreateDefinitionIfMissing<CameraOutputDefinition>(MissingOutputPath);
+            CreateBehaviorIfMissing<FollowCameraRigBehaviorDefinition>(FollowBehaviorPath);
+            CreateBehaviorIfMissing<MountedCameraRigBehaviorDefinition>(MountedBehaviorPath);
+            string viewAPath = mode == QaCameraAdr026TopologyMode.Shared
+                ? MainViewPath
+                : SplitAViewPath;
+            string viewBPath = mode == QaCameraAdr026TopologyMode.Shared
+                ? SecondaryViewPath
+                : SplitBViewPath;
+            CreateDefinitionIfMissing<CameraViewDefinition>(viewAPath);
+            CreateDefinitionIfMissing<CameraViewDefinition>(viewBPath);
+            AssetDatabase.SaveAssets();
+
             Scene scene = EditorSceneManager.OpenScene(GlobalScenePath, OpenSceneMode.Single);
             RemoveOwnedCameraTopology(scene);
+
+            var outputADefinition = RequireDefinition<CameraOutputDefinition>(OutputAPath);
+            var outputBDefinition = RequireDefinition<CameraOutputDefinition>(OutputBPath);
+            var followBehavior = RequireBehavior<FollowCameraRigBehaviorDefinition>(FollowBehaviorPath);
+            var mountedBehavior = RequireBehavior<MountedCameraRigBehaviorDefinition>(MountedBehaviorPath);
+            var viewA = RequireDefinition<CameraViewDefinition>(viewAPath);
+            var viewB = RequireDefinition<CameraViewDefinition>(viewBPath);
 
             CameraOutputAuthoring outputA = CreateOutput(
                 scene,
                 OutputARootName,
-                OutputAId,
+                outputADefinition,
                 "Main",
-                CameraRigPresentationIntent.Follow);
+                followBehavior);
             CameraOutputAuthoring outputB = CreateOutput(
                 scene,
                 OutputBRootName,
-                OutputBId,
+                outputBDefinition,
                 "Secondary",
-                CameraRigPresentationIntent.Mounted);
+                mountedBehavior);
 
             ConfigureSessionOverride(outputA);
-            ConfigureSharedComposition(outputA, mode);
-            ConfigurePolicy(scene, mode);
+            ConfigureSharedComposition(outputA, viewA, SimpleViewport(mode));
+            ConfigurePolicy(scene, viewB, outputBDefinition, AdvancedViewport(mode));
             DisableAutomaticInputSplitScreen(scene);
             ValidateInMemory(scene, outputA, outputB, mode);
 
@@ -74,9 +155,9 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private static CameraOutputAuthoring CreateOutput(
             Scene scene,
             string rootName,
-            string outputId,
+            CameraOutputDefinition outputDefinition,
             string label,
-            CameraRigPresentationIntent intent)
+            CameraRigBehaviorDefinition behavior)
         {
             var root = new GameObject(rootName);
             SceneManager.MoveGameObjectToScene(root, scene);
@@ -86,10 +167,6 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             CinemachineBrain brain = root.AddComponent<CinemachineBrain>();
             CameraOutputAuthoring output = root.AddComponent<CameraOutputAuthoring>();
 
-            var targetObject = new GameObject($"QA ADR026 {label} Target");
-            targetObject.transform.SetParent(root.transform, false);
-            Transform target = targetObject.transform;
-
             var rigRoot = new GameObject($"QA ADR026 {label} Default Rig");
             rigRoot.transform.SetParent(root.transform, false);
             CameraRigComposer composer = rigRoot.AddComponent<CameraRigComposer>();
@@ -98,17 +175,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             cameraObject.transform.SetParent(rigRoot.transform, false);
             CinemachineCamera cinemachine = cameraObject.AddComponent<CinemachineCamera>();
 
-            Set(composer, "presentationIntent", (int)intent);
-            Set(composer, "targetSourceKind", (int)CameraTargetSourceKind.ExplicitTransform);
-            Set(composer, "targetSource", null);
-            Set(composer, "explicitFollowTarget", target);
-            Set(composer, "explicitLookAtTarget", target);
-            Set(composer, "followRequirement", (int)(intent == CameraRigPresentationIntent.Fixed
-                ? CameraTargetRequirement.Optional
-                : CameraTargetRequirement.Required));
-            Set(composer, "lookAtRequirement", (int)CameraTargetRequirement.Optional);
-            Set(composer, "cinemachineCamera", cinemachine);
-            Set(composer, "logApplyRebuildDiagnostics", false);
+            AssignComposerBeforeApplyRebuild(composer, behavior, cinemachine, label);
 
             CameraRigComposerApplyRebuildResult materialization =
                 CameraRigComposerApplyRebuildUtility.ApplyOrRebuild(
@@ -124,7 +191,7 @@ namespace ImmersiveFrameworkQA.Camera.Editor
 
             // Bind the physical output only after rig materialization. This prevents any
             // authoring/rebuild work from participating in output-reference assignment.
-            Set(output, "outputId", outputId);
+            Set(output, "outputDefinition", outputDefinition);
             Set(output, "unityCamera", unityCamera);
             Set(output, "cinemachineBrain", brain);
             Set(output, "defaultCameraRig", composer);
@@ -154,11 +221,11 @@ namespace ImmersiveFrameworkQA.Camera.Editor
         private static void ConfigureSessionOverride(CameraOutputAuthoring outputA)
         {
             SessionCameraOverride value = outputA.gameObject.AddComponent<SessionCameraOverride>();
-            Set(value, "outputId", OutputAId);
+            Set(value, "outputDefinition", outputA.OutputDefinition);
             Set(value, "scopeId", "qa.c9r.session.camera");
             Set(value, "requestId", "qa.camera.request.c9r.session");
             Set(value, "rigComposer", outputA.DefaultCameraRig);
-            Set(value, "targetSource", outputA.DefaultCameraRig.ExplicitFollowTarget);
+            Set(value, "targetSource", outputA.transform);
             Set(value, "precedence", 300);
             Set(value, "tieBreakerId", "session");
             Set(value, "logDiagnostics", true);
@@ -166,59 +233,49 @@ namespace ImmersiveFrameworkQA.Camera.Editor
 
         private static void ConfigureSharedComposition(
             CameraOutputAuthoring outputA,
-            QaCameraAdr026TopologyMode mode)
+            CameraViewDefinition view,
+            CameraViewport viewport)
         {
             CameraSharedComposition value =
                 outputA.gameObject.AddComponent<CameraSharedComposition>();
-            Set(value, "viewId", mode == QaCameraAdr026TopologyMode.Shared
-                ? "camera.view.main"
-                : "camera.view.split.a");
-            Set(value, "viewDescription", "ADR-026 canonical shared Player Camera View");
-            Set(value, "assignmentContextId", "qa.camera.adr026.assignments");
-            Set(value, "assignmentOwnerId", "qa.camera.adr026.shared-composition");
-            Set(value, "subjectPolicy",
-                (int)CameraSharedCompositionSubjectPolicyKind.AllAvailableSubjects);
-            Set(value, "outputId", OutputAId);
-            Set(value, "composer", outputA.DefaultCameraRig);
+            value.Configure(
+                view,
+                outputA.OutputDefinition,
+                CameraSharedCompositionSubjectPolicyKind.AllAvailableSubjects,
+                viewport);
+            EditorUtility.SetDirty(value);
         }
 
         private static void ConfigurePolicy(
             Scene scene,
-            QaCameraAdr026TopologyMode mode)
+            CameraViewDefinition viewB,
+            CameraOutputDefinition outputB,
+            CameraViewport viewport)
         {
             var root = new GameObject(PolicyRootName);
             SceneManager.MoveGameObjectToScene(root, scene);
             CameraViewOutputPolicyAuthoring policy =
                 root.AddComponent<CameraViewOutputPolicyAuthoring>();
-
-            CameraViewOutputBinding[] bindings = mode == QaCameraAdr026TopologyMode.Shared
-                ? new[]
-                {
-                    Binding("camera.view.main", OutputAId, 0f, 0f, 1f, 1f),
-                    Binding("camera.view.secondary", OutputBId, 0f, 0f, 1f, 1f)
-                }
-                : new[]
-                {
-                    Binding("camera.view.split.a", OutputAId, 0f, 0f, 0.5f, 1f),
-                    Binding("camera.view.split.b", OutputBId, 0.5f, 0f, 0.5f, 1f)
-                };
-
-            policy.Configure(bindings);
+            policy.Configure(new[] { Binding(viewB, outputB, viewport) });
             EditorUtility.SetDirty(policy);
             EditorUtility.SetDirty(root);
         }
 
-        private static CameraViewOutputBinding Binding(
-            string viewId,
-            string outputId,
-            float x,
-            float y,
-            float width,
-            float height) =>
-            new CameraViewOutputBinding(
-                new CameraViewId(viewId),
-                new CameraOutputId(outputId),
-                new CameraViewport(x, y, width, height));
+        private static CameraViewOutputBindingAuthoring Binding(
+            CameraViewDefinition view,
+            CameraOutputDefinition output,
+            CameraViewport viewport)
+        {
+            var binding = new CameraViewOutputBindingAuthoring();
+            binding.Configure(view, output, viewport);
+            return binding;
+        }
+
+        internal static CameraViewport SimpleViewport(QaCameraAdr026TopologyMode mode) =>
+            mode == QaCameraAdr026TopologyMode.Shared ? SharedSimpleViewport : SplitSimpleViewport;
+
+        internal static CameraViewport AdvancedViewport(QaCameraAdr026TopologyMode mode) =>
+            mode == QaCameraAdr026TopologyMode.Shared ? SharedAdvancedViewport : SplitAdvancedViewport;
 
         private static void RemoveOwnedCameraTopology(Scene scene)
         {
@@ -287,8 +344,16 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                     $"outputs='{outputs.Count}' policies='{policies.Count}' " +
                     $"sessionOverrides='{sessionOverrides.Count}'.");
 
-            ValidateOutput(outputA, "A", OutputAId);
-            ValidateOutput(outputB, "B", OutputBId);
+            ValidateOutput(
+                outputA,
+                "A",
+                RequireDefinition<CameraOutputDefinition>(OutputAPath),
+                RequireBehavior<FollowCameraRigBehaviorDefinition>(FollowBehaviorPath));
+            ValidateOutput(
+                outputB,
+                "B",
+                RequireDefinition<CameraOutputDefinition>(OutputBPath),
+                RequireBehavior<MountedCameraRigBehaviorDefinition>(MountedBehaviorPath));
 
             if (ReferenceEquals(outputA.UnityCamera, outputB.UnityCamera) ||
                 ReferenceEquals(outputA.CinemachineBrain, outputB.CinemachineBrain) ||
@@ -296,10 +361,18 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                 throw new InvalidOperationException(
                     "Rebuilt ADR-026 outputs are not physically independent.");
 
-            if (!policies[0].TryBuildTopology(out CameraViewOutputTopology topology, out string issue) ||
-                topology == null || topology.BindingCount != 2)
-                throw new InvalidOperationException(
-                    $"Rebuilt ADR-026 View-to-Output topology is invalid for '{mode}'. {issue}");
+            CameraSharedComposition composition = outputA.GetComponent<CameraSharedComposition>();
+            string viewAPath = mode == QaCameraAdr026TopologyMode.Shared ? MainViewPath : SplitAViewPath;
+            string viewBPath = mode == QaCameraAdr026TopologyMode.Shared ? SecondaryViewPath : SplitBViewPath;
+            ValidateAggregateAuthoredTopology(
+                composition,
+                policies[0],
+                outputA,
+                outputB,
+                RequireDefinition<CameraViewDefinition>(viewAPath),
+                RequireDefinition<CameraViewDefinition>(viewBPath),
+                SimpleViewport(mode),
+                AdvancedViewport(mode));
 
             foreach (PlayerInputManager manager in FindInScene<PlayerInputManager>(scene))
                 if (manager.splitScreen)
@@ -307,14 +380,111 @@ namespace ImmersiveFrameworkQA.Camera.Editor
                         "PlayerInputManager automatic split-screen must remain disabled.");
         }
 
+        internal static void ValidateAggregateAuthoredTopology(
+            CameraSharedComposition composition,
+            CameraViewOutputPolicyAuthoring policy,
+            CameraOutputAuthoring outputA,
+            CameraOutputAuthoring outputB,
+            CameraViewDefinition viewA,
+            CameraViewDefinition viewB,
+            CameraViewport simpleViewport,
+            CameraViewport advancedViewport)
+        {
+            if (composition == null)
+                throw new InvalidOperationException(
+                    "ADR-026 simple Camera association requires CameraSharedComposition on Output A.");
+            if (policy == null)
+                throw new InvalidOperationException(
+                    "ADR-026 advanced Camera association requires exactly one Camera View Output Policy.");
+            if (!ReferenceEquals(composition.ViewDefinition, viewA) ||
+                !ReferenceEquals(composition.OutputDefinition, outputA.OutputDefinition))
+                throw new InvalidOperationException(
+                    "Simple Camera association is not bound to the exact Output A View and Output definitions.");
+            if (!composition.TryCreateAssociationBinding(
+                    out CameraViewOutputBinding simple, out string simpleIssue) ||
+                simple.Viewport != simpleViewport)
+                throw new InvalidOperationException(
+                    $"Simple Camera association did not project the expected Output A viewport. {simpleIssue}");
+
+            if (!policy.TryBuildTopology(out CameraViewOutputTopology advanced, out string advancedIssue) ||
+                advanced == null || advanced.BindingCount != 1)
+                throw new InvalidOperationException(
+                    $"Advanced Camera policy must author exactly one Secondary Output association. {advancedIssue}");
+            if (advanced.TryGetBinding(outputA.OutputId, out _))
+                throw new InvalidOperationException(
+                    "Advanced Camera policy must not bind Output A; Output A is owned by the simple association.");
+            if (!advanced.TryGetBinding(viewB.ViewId, outputB.OutputId, out CameraViewOutputBinding policyBinding) ||
+                policyBinding.Viewport != advancedViewport)
+                throw new InvalidOperationException(
+                    "Advanced Camera policy did not project the exact Secondary View to Output B association.");
+            if (!policy.TryValidateOutputs(new[] { outputA, outputB }, out string outputIssue))
+                throw new InvalidOperationException(outputIssue);
+
+            CameraViewOutputBinding[] aggregate =
+            {
+                simple,
+                policyBinding
+            };
+            if (!CameraViewOutputTopology.TryCreate(
+                    aggregate, out CameraViewOutputTopology topology, out string topologyIssue) ||
+                topology == null || topology.BindingCount != 2)
+                throw new InvalidOperationException(
+                    $"Aggregate Camera View-to-Output topology is invalid. {topologyIssue}");
+            if (!topology.TryGetBinding(viewA.ViewId, outputA.OutputId, out CameraViewOutputBinding boundA) ||
+                boundA.Viewport != simpleViewport ||
+                !topology.TryGetBinding(viewB.ViewId, outputB.OutputId, out CameraViewOutputBinding boundB) ||
+                boundB.Viewport != advancedViewport)
+                throw new InvalidOperationException(
+                    "Aggregate Camera topology did not retain exact simple Output A and advanced Output B associations.");
+        }
+
+        internal static void AssignComposerBeforeApplyRebuild(
+            CameraRigComposer composer,
+            CameraRigBehaviorDefinition behavior,
+            CinemachineCamera cinemachine,
+            string diagnosticLabel)
+        {
+            if (composer == null)
+                throw new InvalidOperationException(
+                    $"ADR-026 {diagnosticLabel} Default rig is missing CameraRigComposer.");
+            if (behavior == null)
+                throw new InvalidOperationException(
+                    $"ADR-026 {diagnosticLabel} Default rig was not given a Camera Rig Behavior Definition. " +
+                    "Create and load the Behavior asset before CreateOutput.");
+
+            var serialized = new SerializedObject(composer);
+            serialized.Update();
+            SerializedProperty behaviorProperty = serialized.FindProperty("behaviorDefinition") ??
+                throw new InvalidOperationException(
+                    "Serialized property 'behaviorDefinition' was not found on CameraRigComposer.");
+            SerializedProperty cameraProperty = serialized.FindProperty("cinemachineCamera") ??
+                throw new InvalidOperationException(
+                    "Serialized property 'cinemachineCamera' was not found on CameraRigComposer.");
+            SerializedProperty logProperty = serialized.FindProperty("logApplyRebuildDiagnostics") ??
+                throw new InvalidOperationException(
+                    "Serialized property 'logApplyRebuildDiagnostics' was not found on CameraRigComposer.");
+
+            behaviorProperty.objectReferenceValue = behavior;
+            cameraProperty.objectReferenceValue = cinemachine;
+            logProperty.boolValue = false;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(composer);
+
+            if (!ReferenceEquals(composer.BehaviorDefinition, behavior))
+                throw new InvalidOperationException(
+                    $"ADR-026 {diagnosticLabel} CameraRigComposer did not receive the exact Behavior Definition before Apply/Rebuild. " +
+                    $"passed='{behavior.name}' assigned='{(composer.BehaviorDefinition != null ? composer.BehaviorDefinition.name : "<null>")}'.");
+        }
+
         private static void ValidateOutput(
             CameraOutputAuthoring output,
             string label,
-            string expectedId)
+            CameraOutputDefinition expectedDefinition,
+            CameraRigBehaviorDefinition expectedBehavior)
         {
-            if (output == null || output.OutputIdText != expectedId)
+            if (output == null || !ReferenceEquals(output.OutputDefinition, expectedDefinition))
                 throw new InvalidOperationException(
-                    $"ADR-026 Output {label} identity is invalid. expected='{expectedId}'.");
+                    $"ADR-026 Output {label} definition reference is invalid.");
             if (output.UnityCamera == null)
                 throw new InvalidOperationException(
                     $"ADR-026 Output {label} has no explicit Unity Camera after rebuild.");
@@ -327,6 +497,15 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             if (!ReferenceEquals(output.UnityCamera.gameObject, output.CinemachineBrain.gameObject))
                 throw new InvalidOperationException(
                     $"ADR-026 Output {label} Camera and Brain must share one GameObject.");
+            if (expectedBehavior == null)
+                throw new InvalidOperationException(
+                    $"ADR-026 Output {label} expected Camera Rig Behavior Definition is missing.");
+            if (!ReferenceEquals(output.DefaultCameraRig.BehaviorDefinition, expectedBehavior))
+                throw new InvalidOperationException(
+                    $"ADR-026 Output {label} Default Camera Rig must use the exact '{expectedBehavior.name}' Behavior Definition.");
+            if (!expectedBehavior.TryValidate(out string behaviorIssue))
+                throw new InvalidOperationException(
+                    $"ADR-026 Output {label} Default Camera Rig Behavior Definition is invalid. {behaviorIssue}");
         }
 
         private static List<T> FindInScene<T>(Scene scene) where T : Component

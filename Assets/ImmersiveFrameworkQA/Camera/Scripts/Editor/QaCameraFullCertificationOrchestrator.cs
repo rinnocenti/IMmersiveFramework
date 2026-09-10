@@ -22,13 +22,10 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             "Assets/ImmersiveFrameworkQA/Camera/Scenes/QA_PlayerCameraArbitration.unity";
         private const string CameraRouteTriggerName =
             "RouteTrigger_Camera__Override_Authority";
-        private const string Adr022MenuPath =
-            "Immersive Framework/QA/Regressions/Camera/Run ADR-022 Presentation Materialization Regression";
-        private const string Adr022TerminalPrefix = "[QA][ADR022 Presentation Models] PASS.";
         private const string PhaseKey = "ImmersiveFrameworkQA.QA_CAMERA_FULL.Phase";
         private const string FailureKey = "ImmersiveFrameworkQA.QA_CAMERA_FULL.Failure";
         private const double TimeoutSeconds = 180d;
-        private const int EstablishedCaseCount = 14 + 11 + 18 + 10;
+        private const int EstablishedCaseCount = 11 + 18 + 10;
 
         private enum Phase
         {
@@ -73,9 +70,6 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             SessionState.EraseString(FailureKey);
             try
             {
-                Require(RunAdr022PresentationCertification(),
-                    "ADR-022 Presentation Materialization did not reach PASS 14/14.");
-
                 // Shared topology preparation is also the canonical repository-wide
                 // baseline repair. The guard reloads QA_UIGlobal from disk and refuses
                 // to continue if Camera/Brain/DefaultRig references were not persisted.
@@ -369,36 +363,6 @@ namespace ImmersiveFrameworkQA.Camera.Editor
             Require(matches == 1 && resolved != null,
                 $"Expected one authored Camera Route trigger, found '{matches}'.");
             return true;
-        }
-
-        private static bool RunAdr022PresentationCertification()
-        {
-            string terminal = string.Empty;
-            void Capture(string condition, string stackTrace, LogType type)
-            {
-                if (!string.IsNullOrEmpty(condition) &&
-                    condition.StartsWith(
-                        "[QA][ADR022 Presentation Models]",
-                        StringComparison.Ordinal))
-                {
-                    terminal = condition;
-                }
-            }
-
-            Application.logMessageReceived += Capture;
-            try
-            {
-                bool invoked = EditorApplication.ExecuteMenuItem(Adr022MenuPath);
-                return invoked &&
-                    terminal.StartsWith(
-                        Adr022TerminalPrefix,
-                        StringComparison.Ordinal) &&
-                    terminal.Contains("cases='14/14'");
-            }
-            finally
-            {
-                Application.logMessageReceived -= Capture;
-            }
         }
 
         private static bool AllLegacyEvidenceExecuted() =>

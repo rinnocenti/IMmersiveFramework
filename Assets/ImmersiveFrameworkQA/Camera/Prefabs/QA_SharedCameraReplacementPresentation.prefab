@@ -102,7 +102,7 @@ GameObject:
   - component: {fileID: 5189306724471392840}
   - component: {fileID: 5424884808614239315}
   m_Layer: 0
-  m_Name: QA_DefaultPresentation
+  m_Name: QA_SharedCameraReplacementPresentation
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
